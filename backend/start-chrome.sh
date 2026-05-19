@@ -16,6 +16,22 @@ rm -f /data/chrome-profile/SingletonLock \
 
 export DISPLAY=:99
 
+# Minimal flag set:
+#   - --no-sandbox: required inside the container (no userns by default)
+#   - --user-data-dir: persistent profile (cookies, login state)
+#   - --remote-debugging-port + --remote-allow-origins: CDP for search-proxy / web-kit
+#   - --disable-blink-features=AutomationControlled: hides navigator.webdriver
+#   - --window-size: deterministic viewport for parsers
+#
+# Per patchright research, the following commonly-added flags are themselves
+# detection signals (rare in real users) and are deliberately NOT set:
+#   --disable-default-apps, --disable-popup-blocking, --disable-extensions-except=,
+#   --disable-plugins, --disable-sync, --disable-translate, --metrics-recording-only,
+#   --disable-background-networking, --disable-client-side-phishing-detection,
+#   --disable-hang-monitor, --enable-automation, --disable-gpu
+#
+# We let GPU run via Xvfb's software stack (Mesa) — its WebGL fingerprint blends
+# in with real users far better than SwiftShader (which --disable-gpu forces).
 exec google-chrome-stable \
     --no-sandbox \
     --no-first-run \
@@ -23,19 +39,9 @@ exec google-chrome-stable \
     --remote-debugging-port=9222 \
     --remote-allow-origins=* \
     --user-data-dir=/data/chrome-profile \
-    --disable-gpu \
     --disable-dev-shm-usage \
-    --disable-background-networking \
-    --disable-client-side-phishing-detection \
-    --disable-default-apps \
-    --disable-hang-monitor \
-    --disable-popup-blocking \
-    --disable-sync \
-    --disable-translate \
-    --disable-features=IsolateOrigins,site-per-process \
     --disable-blink-features=AutomationControlled \
-    --metrics-recording-only \
     --window-size=1920,1080 \
-    --disable-extensions-except= \
-    --disable-plugins \
+    --force-webrtc-ip-handling-policy=disable_non_proxied_udp \
     "about:blank"
+

@@ -22,7 +22,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 
 from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
-from playwright.async_api import async_playwright
+from patchright.async_api import async_playwright
 
 CDP_URL = os.environ.get("CDP_URL", "http://localhost:9222")
 PORT = int(os.environ.get("PORT", "3100"))

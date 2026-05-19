@@ -140,6 +140,27 @@ For first-time Google login (avoids captchas later):
 | Network blip to upstream | < 60s per quarantine | failure cache + SearxNG `suspended_times` |
 | Container OOM | depends on host | `restart: unless-stopped` |
 
+### Anti-detection
+
+The browser side uses [`patchright`](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright)
+(a drop-in Playwright replacement that patches CDP-level leaks like
+`Runtime.enable` / `Console.enable`) plus a minimal Chrome-flag set.
+Verified pass results on canonical test sites:
+
+| Test site | Result |
+|---|---|
+| `bot.sannysoft.com` | WebDriver / WebDriver Advanced / Chrome / Plugins / `debugTool: false` — all passed |
+| `nowsecure.nl` (Cloudflare anti-bot) | Passes Cloudflare challenge consistently across 3+ runs |
+| Google / DuckDuckGo / Bing SERP | Stable, low captcha frequency with persistent profile |
+
+Limits — the backend will **not** reliably pass:
+- Cloudflare Turnstile (interactive widget)
+- DataDome / PerimeterX / Akamai Bot Manager
+- Any site that requires residential IPs (datacenter IP fingerprinting)
+
+For those, plug the `ask-search` / `crwlr` clients into a SaaS like Bright Data,
+ZenRows, or ScrapFly instead.
+
 Verify yourself:
 ```bash
 docker exec web-kit-backend pkill -9 -f google-chrome-stable

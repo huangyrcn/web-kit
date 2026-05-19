@@ -21,9 +21,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get install -y --no-install-recommends google-chrome-stable \
     && rm -rf /var/lib/apt/lists/*
 
-# search-proxy deps
+# search-proxy deps — patchright is a drop-in for Playwright with anti-detection
+# patches at the CDP protocol level (Runtime.enable / Console.enable leak fixes,
+# safer default flags). See https://github.com/Kaliiiiiiiiii-Vinyzu/patchright
 RUN pip install --no-cache-dir --break-system-packages --ignore-installed \
-        fastapi==0.115.12 uvicorn==0.34.2 playwright==1.52.0
+        fastapi==0.115.12 uvicorn==0.34.2 patchright
 
 # SearxNG: clone source and install into system Python (no venv needed since
 # this image is dedicated to one Python app stack). Use --break-system-packages
