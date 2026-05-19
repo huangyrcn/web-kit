@@ -89,8 +89,14 @@ ask-search "fastapi" -e pypi,npm,crates,pkg_go_dev
 
 可用引擎完整列表见 `references/engines.md`。
 
-**经验法则**：能不用 google/duckduckgo 就不用 —— 它们走 Chrome 最贵，
-被限流后会拖累整个搜索。
+**经验法则**：
+- **学术调研**：`-e arxiv,openalex,semantic_scholar` —— 走 API，但 ArXiv 偶尔限流；命中率不
+高时再退回到默认全引擎。
+- **代码/包**：`-e github,github_code,pypi,npm,...` —— 走 API，没结果就是真没结果，不会挂。
+- **通用网页搜索**：**不要只用 `-e bing,brave`**。bing 直连偶发 connection error，brave 也一样。
+要么用默认（聚合所有），要么用 `-e google,duckduckgo,bing,brave` 多路冗余。
+- 当 ask-search 返回 `no_results` 且 `unresponsive_engines` 非空时，调用方应该
+**换不同 engine 集合重试**，而不是认为"没匹配"。
 
 环境变量：`SEARXNG_URL`（必须配置，如 `http://localhost:8082`）
 
