@@ -13,16 +13,16 @@ venv/
 *~
 
 # Local overrides — users keep their real settings here, never committed
-searxng-settings/settings.yml
+backend/searxng-settings/settings.yml
 .env
 .env.local
 secrets.yml
 
 # Runtime / probe artifacts
-chrome-profile/
+backend/chrome-profile/
 *.log
-bench/results/
+backend/bench/results/
 /tmp/probe.json
 
 # Docker compose override
-docker-compose.override.yml
+backend/docker-compose.override.yml

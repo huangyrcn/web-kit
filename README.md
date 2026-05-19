@@ -1,186 +1,210 @@
-# web-kit-backend
+# web-kit
 
-A reliable, single-container search + browser backend for the [web-kit](./client/) skill suite.
-Bundles SearxNG, a Chrome+Playwright search proxy, and a Chrome DevTools Protocol (CDP) endpoint
-behind one `docker compose up`.
-
-## Why
-
-Self-hosted SearxNG instances often need a headless browser to bypass JavaScript-heavy
-search engines (Google, DuckDuckGo). The typical setup is 4+ separate containers
-(searxng, redis, browser-proxy, novnc, etc.) glued together with networking — fragile,
-hard to diagnose, and prone to one container's failure cascading into the rest.
-
-This project collapses the stack into a **single container** with `supervisord` managing
-all processes, and adds **four layers of self-healing** so a Chrome crash doesn't
-take down search.
-
-## Features
-
-- **One `docker compose up`** to bring up the full stack
-- **Three exposed endpoints** for clients:
-  - `:8082` — SearxNG (drop-in for `ask-search`, `searxng-mcp`, etc.)
-  - `:9223` — Chrome DevTools Protocol (drop-in for any Playwright/Puppeteer client)
-  - `:6080` — noVNC for one-time manual login (Google account, captcha solve, etc.)
-- **Persistent Chrome profile** via Docker volume — log in once, cookies survive restarts
-- **Self-healing**:
-  - Process-level: supervisord restarts any dead program (`autorestart=true`)
-  - Application-level: `_ensure_browser()` reconnects CDP on each request if the browser died
-  - Container-level: `HEALTHCHECK` probes all three ports, marks the container unhealthy on failure
-  - Business-level: `watchdog.sh` runs a real search query every 60s; 3 consecutive failures triggers `supervisorctl restart chrome search-proxy` (catches "process alive but browser hung")
-
-## Architecture
+A skill bundle for AI coding agents (Claude Code, Copilot CLI, etc.) that gives them
+**three lightweight web primitives**: search, page reading, and authenticated download.
+Plus a self-hosted **single-container backend** that powers them all.
 
 ```
-                    web-kit-backend container (supervisord PID 1, 9 programs)
+┌──────────────────────────┐         ┌──────────────────────────────────┐
+│   skill/  (the AI skill) │  ◄───►  │   backend/  (the server side)    │
+│   ─────────────────────  │         │   ─────────────────────────────  │
+│   ask-search             │         │   SearxNG + Chrome+Playwright    │
+│   crwlr                  │         │   CDP, all in one container,     │
+│   cdp-download           │         │   self-healing in 4 layers       │
+└──────────────────────────┘         └──────────────────────────────────┘
+        │                                            ▲
+        └─ uses ──── SEARXNG_URL=http://...:8082 ────┤
+                     CDP_URL=http://...:9223 ────────┘
+```
+
+You can run them together (this repo's main story) or split:
+- **skill only** — point at any existing SearxNG / CDP-enabled Chrome you already have.
+- **backend only** — drop-in replacement for the typical 4-container searxng + browser-proxy stack.
+
+---
+
+## skill/ — the AI skill
+
+Three commands an agent can call:
+
+| Tool | What it does | When agents use it |
+|---|---|---|
+| `ask-search "<query>"` | SearxNG-aggregated web search, multi-engine | "search for X", "look this up", "找一下…" |
+| `crwlr crawl -o md "<url>"` | Real-browser-rendered page → clean markdown | "read this page", "what does this URL say", "转成 markdown" |
+| `cdp-download <url>` | File download via Chrome DevTools Protocol (uses browser cookies) | When `wget`/`curl` fails on auth-protected URLs |
+
+Compared to a vanilla agent's built-in web tools, this skill gives:
+- Real JS rendering (the page the user actually sees, not a server-side stripped version)
+- Persistent login cookies (login once via noVNC, all subsequent crawls are authenticated)
+- Aggregation across many search engines (Google, DDG, Bing, Brave, plus 13 academic sources)
+- Lightweight CLI surface — no MCP server / no extra runtime
+
+### Install (Claude Code example)
+
+```bash
+git clone https://github.com/huangyrcn/web-kit.git
+cp -r web-kit/skill ~/.claude/skills/web-kit
+chmod +x ~/.claude/skills/web-kit/scripts/*
+
+# Tell the skill where its backend lives
+export SEARXNG_URL=http://your-host:8082
+export CDP_URL=http://your-host:9223
+```
+
+For Copilot CLI, Gemini CLI, or other platforms, see `skill/SKILL.md` — the doc lists
+the per-platform skill loading mechanism.
+
+### Required environment variables
+
+| Var | Used by | Example |
+|---|---|---|
+| `SEARXNG_URL` | `ask-search` | `http://localhost:8082` |
+| `CDP_URL` | `crwlr`, `cdp-download` | `http://localhost:9223` |
+
+If you already have a SearxNG instance and a Chrome with CDP exposed, you can stop here.
+
+---
+
+## backend/ — the single-container server
+
+Self-hosted backend that serves both `SEARXNG_URL` (port 8082) and `CDP_URL` (port 9223),
+plus a noVNC interface (port 6080) for one-time manual cookie login.
+
+### Why bundle into one container?
+
+Self-hosted SearxNG with a JS-rendering search-proxy typically requires 4+ separate
+containers (searxng, redis, browser-proxy, novnc) glued together with networking.
+That's fragile — one container's failure cascades into the rest, and there's no
+single place to monitor or restart things.
+
+This backend collapses it into **one container**, with `supervisord` managing all
+processes and **four layers of self-healing**:
+
+1. **Process-level** — supervisord `autorestart=true` restarts any crashed process.
+2. **Application-level** — `_ensure_browser()` reconnects CDP on each request if
+   the underlying Chrome crashed in between.
+3. **Container-level** — Docker `HEALTHCHECK` probes all three exposed ports.
+4. **Business-level** — `watchdog.sh` runs a real search every 60s and triggers
+   `supervisorctl restart chrome search-proxy` after 3 consecutive failures
+   (catches "process alive but browser hung").
+
+### Quick start
+
+```bash
+cd backend
+cp searxng-settings/settings.yml.example searxng-settings/settings.yml
+$EDITOR searxng-settings/settings.yml      # set secret_key + any API keys
+
+docker compose up -d                        # first build ~5-10 min for Chrome + SearxNG
+sleep 90                                    # warm-up
+
+curl 'http://localhost:8082/search?q=test&format=json' | jq '.results | length'
+curl http://localhost:9223/json/version | jq .Browser
+```
+
+For first-time Google login (avoids captchas later):
+1. Open `http://localhost:6080/vnc.html`
+2. Click **Connect** — you'll see a fluxbox desktop with a Chrome window
+3. Sign in to Google; cookies persist in the Docker volume
+
+### Architecture
+
+```
+        backend container (supervisord PID 1, 9 supervised programs)
    ┌─────────────────────────────────────────────────────────────────────┐
    │                                                                     │
-   │  Xvfb :99 ── fluxbox ── x11vnc :5900 ── websockify  ─► host:6080    │
+   │  Xvfb :99 ── fluxbox ── x11vnc :5900 ── websockify ─► host:6080     │
    │                                                                     │
    │  google-chrome --remote-debugging-port=9222                         │
    │       │                                                             │
    │       ├─ socat ─► host:9223  (CDP, used by Playwright/Puppeteer)    │
    │       │                                                             │
-   │       └─ search-proxy (FastAPI, localhost:3100)                     │
-   │              │                                                      │
+   │       └─ search-proxy (FastAPI :3100, localhost only)               │
+   │              ↑                                                      │
    │              └─ /google, /ddg endpoints — Chrome-rendered HTML      │
-   │                       ▲                                             │
-   │  SearxNG (granian, :8080) ── http://localhost:3100/{google,ddg}     │
-   │       │                                                             │
+   │                                                                     │
+   │  SearxNG (granian :8080) ── http://localhost:3100/{google,ddg}      │
    │       └─► host:8082                                                 │
    │                                                                     │
-   │  watchdog.sh (60s probe) ─ supervisorctl restart chrome on failure  │
+   │  watchdog.sh (60s probe) ── supervisorctl restart on failure        │
    │                                                                     │
    └─────────────────────────────────────────────────────────────────────┘
-
-   Chrome profile is persisted in a Docker volume.
-   Settings live in ./searxng-settings/settings.yml (bind-mounted).
 ```
 
-## Quick start
+### Reliability — measured on a single x86_64 host
 
+| Failure mode | Recovery | How |
+|---|---|---|
+| Chrome killed (`pkill -9`) | ~12s CDP back, ~43s search results back | supervisord + `_ensure_browser()` reconnect |
+| FastAPI search-proxy hung | < 60s | watchdog detects + restarts |
+| Network blip to upstream | < 60s per quarantine | failure cache + SearxNG `suspended_times` |
+| Container OOM | depends on host | `restart: unless-stopped` |
+
+Verify yourself:
 ```bash
-git clone https://github.com/<your-org>/web-kit-backend.git
-cd web-kit-backend
-
-# 1. Create your settings file from the template, then edit it
-cp searxng-settings/settings.yml.example searxng-settings/settings.yml
-$EDITOR searxng-settings/settings.yml      # set secret_key + any API keys you need
-
-# 2. Build and start (first build takes ~5-10 min for Chrome + SearxNG)
-docker compose up -d
-
-# 3. Wait ~90s for the stack to warm up
-docker compose ps                            # should show "healthy"
-
-# 4. Test
-curl 'http://localhost:8082/search?q=test&format=json' | jq '.results | length'
-curl http://localhost:9223/json/version | jq .Browser
-open http://localhost:6080/vnc.html         # noVNC, for manual cookie login
+docker exec web-kit-backend pkill -9 -f google-chrome-stable
+time until curl -s 'http://localhost:8082/search?q=test&format=json' \
+            | jq -e '.unresponsive_engines | length == 0' >/dev/null; do sleep 1; done
 ```
 
-For first-time Google login (avoids captcha later):
-1. Open `http://localhost:6080/vnc.html` in a browser
-2. Click "Connect" — you'll see a fluxbox desktop with a Chrome window
-3. Sign in to your Google account; cookies are saved to the persistent profile
+### Performance
 
-## Configuration
+Loopback benchmarks on the host:
+
+| Scenario | P50 | P95 |
+|---|---|---|
+| Sequential SearxNG search | ~3.6s | ~4.5s |
+| Concurrent ×3 | ~9s | ~12s |
+| LAN cross-host | ~5.7s | ~5.9s |
+
+Run your own bench:
+```bash
+python3 backend/bench/speed-test.py -n 8 --target http://localhost:8082
+```
+
+### Configuration knobs
 
 | Where | What | Default |
 |---|---|---|
 | `searxng-settings/settings.yml` | SearxNG engines, secret key, API keys | required, see `.example` |
-| `docker-compose.yml` ports | Host port mappings | 8082, 9223, 6080 |
-| `docker-compose.yml` `mem_limit` | Container memory cap | 4 GB |
+| `docker-compose.yml` `mem_limit` | container memory cap | 4 GB |
 | `docker-compose.yml` `shm_size` | `/dev/shm` for Chrome | 1 GB |
-| `server.py` `MAX_CONCURRENCY` | Parallel Chrome pages | 3 (also via `SEARCH_PROXY_CONCURRENCY` env) |
-| `server.py` `FAILURE_CACHE_SECONDS` | Skip-engine quarantine | 60s |
+| env `SEARCH_PROXY_CONCURRENCY` | parallel Chrome pages | 3 |
+| env `FAILURE_CACHE_SECONDS` | engine quarantine duration | 60s |
+| env `PROBE_INTERVAL` | watchdog probe interval | 60s |
 
-Environment variables passed to the container (set in compose under `environment:`):
-- `SEARCH_PROXY_CONCURRENCY` — override page-pool size
-- `FAILURE_CACHE_SECONDS` — override quarantine duration
-- `PROBE_INTERVAL` — watchdog probe interval (default 60s)
-- `PROBE_QUERY` — watchdog probe query string (default `test`)
-
-## Reliability — what we tested
-
-| Failure mode | Recovery time | How |
-|---|---|---|
-| Chrome process killed | ~12s (CDP back) / ~43s (search results back) | supervisord restart + `_ensure_browser()` reconnect |
-| FastAPI search-proxy hung | < 60s | watchdog detects + `supervisorctl restart` |
-| Network blip to Google | < 60s per quarantine | failure cache + SearxNG `suspended_times` |
-| Container OOM | depends on host | docker `restart: unless-stopped` |
-
-Verified by:
-```bash
-# Inside the container:
-docker exec web-kit-backend pkill -9 -f google-chrome-stable
-
-# From the host, time how long until search returns google+ddg again:
-time curl -s 'http://localhost:8082/search?q=test&format=json' \
-  | jq -r '.unresponsive_engines | length'
-```
-
-## Performance
-
-Benchmarks on a single x86_64 host (loopback):
-
-| Scenario | P50 | P95 | Notes |
-|---|---|---|---|
-| Sequential SearxNG search | ~3.6s | ~4.5s | bound by Google SERP render time |
-| Concurrent ×3 SearxNG | ~9s | ~12s | matches `Semaphore(3)` design |
-| LAN client (cross-host) | ~5.7s | ~5.9s | adds JSON payload + RTT |
-
-Run your own bench:
-```bash
-python3 bench/speed-test.py -n 8 --target http://localhost:8082
-```
-
-## Client tooling
-
-The [`client/`](./client/) directory contains the matching client-side skill bundle:
-- `SKILL.md` — entry doc for AI agents (Claude Code skill, Copilot CLI, etc.)
-- `scripts/ask-search.py` — search wrapper around SearxNG's JSON API
-- `scripts/crwlr` — Chrome-rendered page-to-markdown wrapper (uses `crwl` + CDP)
-- `scripts/cdp-download` — file download via CDP (handles auth-protected URLs)
-
-To install as a Claude Code skill:
-```bash
-mkdir -p ~/.claude/skills/web-kit
-cp -r client/* ~/.claude/skills/web-kit/
-chmod +x ~/.claude/skills/web-kit/scripts/*
-
-# Set required env vars (in your shell rc):
-export SEARXNG_URL=http://localhost:8082
-export CDP_URL=http://localhost:9223
-```
+---
 
 ## Repository layout
 
 ```
 .
-├── Dockerfile                  # Multi-step: Playwright base + Chrome + SearxNG
-├── docker-compose.yml
-├── supervisord.conf            # 9 programs, all autorestart
-├── server.py                   # FastAPI search-proxy with _ensure_browser()
-├── start-chrome.sh             # Chrome launch wrapper (clears SingletonLock)
-├── start-searxng.sh            # granian launcher
-├── start-xvfb.sh               # legacy stub (unused, supervisord runs Xvfb directly)
-├── healthcheck.sh              # docker HEALTHCHECK script — probes all 3 ports
-├── watchdog.sh                 # business-level watchdog
-├── searxng-settings/
-│   └── settings.yml.example    # template (real settings.yml is gitignored)
-├── bench/
-│   └── speed-test.py           # stdlib-only benchmark
-└── client/                     # web-kit client-side skill bundle
-    ├── SKILL.md
-    ├── scripts/
-    │   ├── ask-search.py
-    │   ├── crwlr
-    │   └── cdp-download
-    └── references/
-        ├── engines.md
-        └── workflow.md
+├── skill/                       ← the AI skill bundle
+│   ├── SKILL.md
+│   ├── scripts/
+│   │   ├── ask-search.py
+│   │   ├── crwlr
+│   │   └── cdp-download
+│   └── references/
+│       ├── engines.md
+│       └── workflow.md
+│
+├── backend/                     ← the single-container server
+│   ├── Dockerfile
+│   ├── docker-compose.yml
+│   ├── supervisord.conf
+│   ├── server.py                — FastAPI search-proxy with _ensure_browser()
+│   ├── start-chrome.sh / start-searxng.sh / start-xvfb.sh
+│   ├── healthcheck.sh, watchdog.sh
+│   ├── searxng-settings/settings.yml.example   ← real settings.yml is gitignored
+│   └── bench/speed-test.py
+│
+├── README.md
+├── LICENSE          (MIT)
+└── .gitignore
 ```
+
+---
 
 ## License
 
