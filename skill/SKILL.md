@@ -56,15 +56,41 @@ scripts/cdp-download <url> output.pdf
 ## ask-search 速查
 
 ```bash
-ask-search "query"                        # 默认 10 条
+ask-search "query"                        # 默认 10 条（聚合所有引擎）
 ask-search "query" -n 5                   # 限制数量
-ask-search "query" -c news               # 仅新闻
+ask-search "query" -c news                # 仅新闻
 ask-search "query" -c science             # 学术搜索（arxiv, scholar, pubmed 等）
-ask-search "query" -l zh-CN              # 中文结果
-ask-search "query" -e google,bing        # 指定引擎
-ask-search "query" -u                    # 只返回 URL 列表
-ask-search "query" -j                    # 原始 JSON
+ask-search "query" -l zh-CN               # 中文结果
+ask-search "query" -u                     # 只返回 URL 列表
+ask-search "query" -j                     # 原始 JSON
 ```
+
+### 按场景选引擎（`-e` 用法）
+
+默认聚合所有引擎，但 Google/DDG 走 Chrome 渲染，**慢且容易被限流**。
+当任务能定向到 cheap engines 时，**显式指定 `-e` 更快更稳**：
+
+```bash
+# 学术调研（走 API，不经 Chrome）
+ask-search "graph neural network survey" -e arxiv,openalex,semantic_scholar
+
+# 代码 / 仓库（走各自 API）
+ask-search "react hooks lifecycle" -e github,github_code,stackexchange
+
+# 通用网页搜索但绕过 Chrome
+ask-search "openwrt clash docker" -e bing,brave
+
+# 社区 / 讨论
+ask-search "k8s ingress nginx tradeoffs" -e reddit,hackernews
+
+# 包管理器
+ask-search "fastapi" -e pypi,npm,crates,pkg_go_dev
+```
+
+可用引擎完整列表见 `references/engines.md`。
+
+**经验法则**：能不用 google/duckduckgo 就不用 —— 它们走 Chrome 最贵，
+被限流后会拖累整个搜索。
 
 环境变量：`SEARXNG_URL`（必须配置，如 `http://localhost:8082`）
 

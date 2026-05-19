@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-ask-search v1.0.0 — Cross-environment SearxNG search skill
+ask-search v1.1.0 — Cross-environment SearxNG search skill
 
 Works in: OpenClaw (CLI) | Claude Code (CLI) | Antigravity (MCP)
 
 Usage:
-  ask-search "query"                    # top 10 results
+  ask-search "query"                    # top 10 results, all engines
   ask-search "query" --num 5            # limit results
   ask-search "AI news" --categories news
   ask-search "query" --lang zh-CN
+  ask-search "graph nn" -e arxiv,openalex,semantic_scholar   # cheap engines (recommended)
   ask-search "query" --urls-only        # URL list only (pipe to web_fetch)
   ask-search "query" --json             # raw JSON output
 
@@ -17,7 +18,7 @@ Environment:
 """
 import sys, json, urllib.parse, argparse, os, subprocess
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 # --- Tavily support (opt-in via SEARCH_PROVIDER=tavily + TAVILY_API_KEY) ---
 
@@ -41,24 +42,74 @@ def _search_url():
     base = os.environ.get("SEARXNG_URL", "http://localhost:8080")
     return base.rstrip("/") + "/search"
 
-def search(query, num=10, engines=None, lang=None, categories=None):
+
+def _classify_curl_error(returncode: int, stderr: str) -> str:
+    """Map curl exit code + stderr to a typed error_type."""
+    s = stderr.lower()
+    if returncode == 28 or "operation timed out" in s or "timeout" in s:
+        return "timeout"
+    if returncode == 7 or "connection refused" in s or "couldn't connect" in s:
+        return "backend_unreachable"
+    if returncode == 6 or "could not resolve host" in s:
+        return "dns"
+    if returncode == 35 or "ssl" in s:
+        return "tls"
+    if returncode != 0:
+        return "network_error"
+    return "ok"
+
+
+def search(query, num=10, engines=None, lang=None, categories=None, timeout=30):
+    """Search. Returns dict with results, unresponsive_engines, raw."""
     params = {"q": query, "format": "json", "pageno": 1}
     if engines:    params["engines"] = engines
     if lang:       params["language"] = lang
     if categories: params["categories"] = categories
 
     url = _search_url() + "?" + urllib.parse.urlencode(params)
-    # Use subprocess curl to avoid urllib HTTP/1.0 compatibility issues
-    result = subprocess.run(
-        ["curl", "-s", "--max-time", "15", url],
-        capture_output=True, text=True, timeout=20
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"curl failed: {result.stderr[:200]}")
-    data = json.loads(result.stdout)
-    return data.get("results", [])[:num]
 
-def fmt_results(results, urls_only=False):
+    try:
+        result = subprocess.run(
+            # No -s: capture stderr for diagnosis. -sS gives errors without progress.
+            ["curl", "-sS", "--max-time", str(timeout), url],
+            capture_output=True, text=True, timeout=timeout + 5,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(json.dumps({
+            "error_type": "timeout",
+            "message": f"curl wrapper timed out after {timeout + 5}s",
+            "url": url,
+        }))
+
+    if result.returncode != 0:
+        err_type = _classify_curl_error(result.returncode, result.stderr)
+        raise RuntimeError(json.dumps({
+            "error_type": err_type,
+            "curl_exit": result.returncode,
+            "stderr": result.stderr.strip()[:500] or "(empty)",
+            "hint": {
+                "timeout": "query too slow; try -e arxiv,github,bing to skip Chrome-rendered engines",
+                "backend_unreachable": f"is SearxNG running at {_search_url()}?",
+                "dns": "check SEARXNG_URL hostname resolution",
+            }.get(err_type, ""),
+        }))
+
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(json.dumps({
+            "error_type": "bad_response",
+            "message": f"SearxNG returned non-JSON: {e}",
+            "first_200_bytes": result.stdout[:200],
+        }))
+
+    return {
+        "results": data.get("results", [])[:num],
+        "unresponsive_engines": data.get("unresponsive_engines", []),
+        "number_of_results": data.get("number_of_results", 0),
+    }
+
+def fmt_results(results, urls_only=False, unresponsive=None):
     if urls_only:
         return "\n".join(r.get("url", "") for r in results)
     lines = []
@@ -72,13 +123,21 @@ def fmt_results(results, urls_only=False):
         if content: lines.append(f"    {content[:200]}")
         if engines: lines.append(f"    [{engines}]")
         lines.append("")
-    return "\n".join(lines).strip()
+    out = "\n".join(lines).strip()
+    if unresponsive:
+        notes = ", ".join(f"{name}({reason})" for name, reason in unresponsive)
+        out += f"\n\n[!] Unresponsive engines: {notes}"
+    return out
 
 def searxng_search(query, num=15):
-    """MCP/legacy interface — returns JSON string"""
+    """MCP/legacy interface — returns JSON string. Backwards-compatible shape."""
     try:
-        results = search(query, num)
-        return json.dumps({"query": query, "results": results}, ensure_ascii=False, indent=2)
+        bundle = search(query, num)
+        return json.dumps({
+            "query": query,
+            "results": bundle["results"],
+            "unresponsive_engines": bundle["unresponsive_engines"],
+        }, ensure_ascii=False, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)})
 
@@ -86,9 +145,19 @@ def main():
     p = argparse.ArgumentParser(description="SearxNG search (cross-environment)")
     p.add_argument("query")
     p.add_argument("--num",        "-n", type=int, default=10)
-    p.add_argument("--engines",    "-e", help="google,bing,duckduckgo,brave")
+    p.add_argument("--engines",    "-e", help=(
+        "Comma-separated engine list. Common picks: "
+        "academic (arxiv,openalex,semantic_scholar,google_scholar,pubmed); "
+        "code (github,github_code,gitlab,stackexchange,pypi,npm); "
+        "social (reddit,hackernews); "
+        "general-cheap (bing,brave) — these don't go through Chrome; "
+        "general-expensive (google,duckduckgo) — Chrome-rendered, slow, rate-limit-prone. "
+        "Default: all enabled."
+    ))
     p.add_argument("--lang",       "-l", help="zh-CN, en, ja, ko")
     p.add_argument("--categories", "-c", help="general,news,images,science")
+    p.add_argument("--timeout",    "-t", type=int, default=30,
+                                          help="curl timeout in seconds (default: 30)")
     p.add_argument("--json",       "-j", action="store_true")
     p.add_argument("--urls-only",  "-u", action="store_true")
     p.add_argument("--version",    "-V", action="version", version=f"ask-search {VERSION}")
@@ -98,18 +167,45 @@ def main():
         provider = _get_search_provider()
         if provider == "tavily":
             results = tavily_search(args.query, args.num)
+            unresponsive = []
         else:
-            results = search(args.query, args.num, args.engines, args.lang, args.categories)
+            bundle = search(args.query, args.num, args.engines, args.lang,
+                            args.categories, args.timeout)
+            results = bundle["results"]
+            unresponsive = bundle["unresponsive_engines"]
+    except RuntimeError as e:
+        # Already-structured JSON error from search()
+        try:
+            err = json.loads(str(e))
+        except json.JSONDecodeError:
+            err = {"error_type": "internal", "message": str(e)}
+        err["query"] = args.query
+        print(json.dumps(err, ensure_ascii=False))
+        sys.exit(1)
     except Exception as e:
-        print(json.dumps({"error": str(e)})); sys.exit(1)
+        print(json.dumps({"error_type": "internal", "message": str(e),
+                          "query": args.query}, ensure_ascii=False))
+        sys.exit(1)
 
     if not results:
-        print(json.dumps({"error": "No results", "query": args.query})); sys.exit(1)
+        # Empty results — surface unresponsive engines so caller can act
+        out = {"error_type": "no_results", "query": args.query}
+        if unresponsive:
+            out["unresponsive_engines"] = unresponsive
+            out["hint"] = (
+                "Some engines are quarantined. Try -e with cheap engines "
+                "(arxiv,openalex,github,bing,brave) to bypass them."
+            )
+        print(json.dumps(out, ensure_ascii=False)); sys.exit(1)
 
     if getattr(args, "json"):
-        print(json.dumps({"query": args.query, "results": results}, ensure_ascii=False, indent=2))
+        print(json.dumps({
+            "query": args.query,
+            "results": results,
+            "unresponsive_engines": unresponsive,
+        }, ensure_ascii=False, indent=2))
     else:
-        print(fmt_results(results, args.urls_only))
+        print(fmt_results(results, args.urls_only, unresponsive))
 
 if __name__ == "__main__":
     main()
