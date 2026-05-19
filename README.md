@@ -43,14 +43,31 @@ Compared to a vanilla agent's built-in web tools, this skill gives:
 
 ### Install (Claude Code example)
 
+The skill scripts have two runtime dependencies you must install yourself:
+**`crwl`** (the underlying browser automation tool from `crawl4ai`) and the
+**`websocket-client`** Python package (used by `cdp-download` to talk to CDP).
+
 ```bash
+# 1. Clone the repo and copy the skill into your skills dir
 git clone https://github.com/huangyrcn/web-kit.git
 cp -r web-kit/skill ~/.claude/skills/web-kit
 chmod +x ~/.claude/skills/web-kit/scripts/*
 
-# Tell the skill where its backend lives
+# 2. Install the Python dependency
+pip install -r ~/.claude/skills/web-kit/requirements.txt
+
+# 3. Install crwl (the browser automation CLI used by `crwlr`)
+#    See https://github.com/unclecode/crawl4ai for full install options.
+pip install -U crawl4ai
+crawl4ai-setup     # downloads the bundled browser config
+
+# 4. Tell the skill where its backend lives
 export SEARXNG_URL=http://your-host:8082
 export CDP_URL=http://your-host:9223
+
+# 5. Smoke test
+ask-search "hello world" -n 3
+crwlr crawl -o md "https://example.com"
 ```
 
 For Copilot CLI, Gemini CLI, or other platforms, see `skill/SKILL.md` — the doc lists
@@ -108,6 +125,35 @@ For first-time Google login (avoids captchas later):
 1. Open `http://localhost:6080/vnc.html`
 2. Click **Connect** — you'll see a fluxbox desktop with a Chrome window
 3. Sign in to Google; cookies persist in the Docker volume
+
+### Network exposure & access control
+
+By default the three host ports (`8082`, `9223`, `6080`) are bound to
+**`127.0.0.1` only**. The CDP and noVNC endpoints give full browser-session
+takeover — including any cookies you logged in with — so we don't expose
+them to the LAN unless you explicitly opt in.
+
+To use the backend from another machine, the recommended pattern is an
+SSH tunnel:
+
+```bash
+# On the client machine:
+ssh -L 8082:localhost:8082 -L 9223:localhost:9223 -L 6080:localhost:6080 your-server
+```
+
+If you need to expose ports on your LAN directly, set both env vars before
+`docker compose up -d`:
+
+```bash
+# In backend/.env (or your shell env):
+WEB_KIT_BIND=0.0.0.0
+WEB_KIT_VNC_PASSWORD=$(openssl rand -hex 12)   # required when binding to LAN
+```
+
+When `WEB_KIT_VNC_PASSWORD` is set, the noVNC client will prompt for it.
+SearxNG and the CDP endpoint themselves still have no auth layer — the
+binding choice is your only access control. Don't set `WEB_KIT_BIND=0.0.0.0`
+on a network you don't trust.
 
 ### Architecture
 

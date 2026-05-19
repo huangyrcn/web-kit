@@ -38,6 +38,11 @@ _browser_lock = asyncio.Lock()
 _page_sem = asyncio.Semaphore(MAX_CONCURRENCY)
 _failure_cache: dict[str, float] = {}
 
+# /open uses a single dedicated page that's reused across calls.
+# Without this, every /open call leaks a new page target into Chrome.
+_manual_page = None
+_manual_page_lock = asyncio.Lock()
+
 
 async def _ensure_browser():
     """Connect (or reconnect) to Chrome over CDP. Idempotent + concurrency-safe."""
@@ -379,14 +384,32 @@ async def health():
 
 @app.get("/open")
 async def open_url(url: str = Query(...)):
-    """Open a URL in Chrome for manual interaction via VNC."""
+    """Open a URL in Chrome for manual VNC interaction.
+
+    Reuses a single dedicated "manual" page so repeated /open calls don't leak
+    page targets. The page lives across calls (the user is interacting with it
+    via VNC), but the count is always 1.
+    """
+    global _manual_page
     try:
         browser = await _ensure_browser()
     except Exception as e:
         return JSONResponse({"error": f"chrome unreachable: {e}"}, status_code=503)
+
     ctx = await _get_context(browser)
-    page = await ctx.new_page()
-    await page.goto(url, timeout=30000)
+
+    async with _manual_page_lock:
+        # If we have a stored handle but the page was closed (manually or by
+        # Chrome crash), drop it and make a fresh one.
+        if _manual_page is not None and _manual_page.is_closed():
+            _manual_page = None
+        if _manual_page is None:
+            _manual_page = await ctx.new_page()
+        try:
+            await _manual_page.goto(url, timeout=30000)
+        except Exception as e:
+            return JSONResponse({"error": f"goto failed: {e}", "url": url}, status_code=502)
+
     return {"status": "opened", "url": url, "hint": "Use VNC on port 6080 to interact"}
 
 

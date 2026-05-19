@@ -1,0 +1,5 @@
+# Runtime dependencies for the web-kit skill scripts.
+# Install with: pip install -r skill/requirements.txt
+
+# Used by scripts/cdp-download for the CDP WebSocket connection.
+websocket-client>=1.7.0

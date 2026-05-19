@@ -131,46 +131,48 @@ def download(url, output_path=None, cdp_url=None):
 
         stream_handle = resource["stream"]
 
-        # Read stream
-        data = b""
+        # Stream chunks directly to disk. Previously this accumulated the
+        # whole response into a bytes() buffer before writing — fine for a
+        # 100 KB PDF, fragile for a 100 MB one.
         msg_id = 3
-        while True:
-            ws.send(json.dumps({
-                "id": msg_id,
-                "method": "IO.read",
-                "params": {
-                    "handle": stream_handle,
-                    "size": 1024 * 1024  # 1MB chunks
-                }
-            }))
-            msg_id += 1
-            read_result = json.loads(ws.recv())
-
-            if "error" in read_result:
-                raise RuntimeError(f"IO.read error: {read_result['error']}")
-
-            chunk = read_result["result"]
-            if chunk.get("base64Encoded"):
-                data += base64.b64decode(chunk["data"])
-            else:
-                data += chunk["data"].encode()
-
-            # Progress
-            if content_length != "unknown":
-                total = int(content_length)
-                percent = len(data) * 100 // total
-                print(f"\rDownloading: {percent}% ({len(data)}/{total} bytes)", end="", flush=True)
-
-            if chunk.get("eof"):
-                break
-
-        print()  # New line after progress
-
-        # Save file
+        bytes_written = 0
         with open(output_path, "wb") as f:
-            f.write(data)
+            while True:
+                ws.send(json.dumps({
+                    "id": msg_id,
+                    "method": "IO.read",
+                    "params": {
+                        "handle": stream_handle,
+                        "size": 1024 * 1024  # 1 MB per CDP read
+                    }
+                }))
+                msg_id += 1
+                read_result = json.loads(ws.recv())
 
-        print(f"Saved: {output_path} ({len(data)} bytes)")
+                if "error" in read_result:
+                    raise RuntimeError(f"IO.read error: {read_result['error']}")
+
+                chunk = read_result["result"]
+                if chunk.get("base64Encoded"):
+                    payload = base64.b64decode(chunk["data"])
+                else:
+                    payload = chunk["data"].encode()
+
+                f.write(payload)
+                bytes_written += len(payload)
+
+                # Progress
+                if content_length != "unknown":
+                    total = int(content_length)
+                    percent = bytes_written * 100 // total
+                    print(f"\rDownloading: {percent}% ({bytes_written}/{total} bytes)",
+                          end="", flush=True)
+
+                if chunk.get("eof"):
+                    break
+
+        print()  # newline after progress
+        print(f"Saved: {output_path} ({bytes_written} bytes)")
         return output_path
 
     finally:

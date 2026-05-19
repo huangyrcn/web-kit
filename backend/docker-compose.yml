@@ -8,10 +8,17 @@ services:
     restart: unless-stopped
     shm_size: "1gb"
     mem_limit: 4g
+    # Default: bind to 127.0.0.1 only. The CDP endpoint and noVNC give full
+    # browser-session takeover to anyone who can reach them, so we don't
+    # publish them on 0.0.0.0 by default. To expose to the LAN, set
+    # WEB_KIT_BIND=0.0.0.0 in .env (and set WEB_KIT_VNC_PASSWORD as well —
+    # supervisord uses x11vnc -nopw when it's empty).
     ports:
-      - "0.0.0.0:8082:8080"   # SearxNG  (web-kit ask-search)
-      - "0.0.0.0:9223:9223"   # Chrome CDP (web-kit crwlr / cdp-download)
-      - "0.0.0.0:6080:6080"   # noVNC (manual cookie login)
+      - "${WEB_KIT_BIND:-127.0.0.1}:8082:8080"   # SearxNG  (web-kit ask-search)
+      - "${WEB_KIT_BIND:-127.0.0.1}:9223:9223"   # Chrome CDP (web-kit crwlr / cdp-download)
+      - "${WEB_KIT_BIND:-127.0.0.1}:6080:6080"   # noVNC (manual cookie login)
+    environment:
+      WEB_KIT_VNC_PASSWORD: ${WEB_KIT_VNC_PASSWORD:-}
     volumes:
       - ./searxng-settings:/etc/searxng:rw
       - chrome-profile:/data/chrome-profile

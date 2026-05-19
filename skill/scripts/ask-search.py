@@ -14,7 +14,9 @@ Usage:
   ask-search "query" --json             # raw JSON output
 
 Environment:
-  SEARXNG_URL   SearxNG endpoint (default: http://localhost:8080)
+  SEARXNG_URL   SearxNG endpoint (default: http://localhost:8082)
+                — matches the host-side port that backend/docker-compose.yml exposes.
+                Set this if your backend is on a different host or port.
 """
 import sys, json, urllib.parse, argparse, os, subprocess
 
@@ -39,7 +41,9 @@ def tavily_search(query, num=10):
     return response.get("results", [])
 
 def _search_url():
-    base = os.environ.get("SEARXNG_URL", "http://localhost:8080")
+    # Default matches backend/docker-compose.yml host port (8082).
+    # Override via SEARXNG_URL when backend is on a different host/port.
+    base = os.environ.get("SEARXNG_URL", "http://localhost:8082")
     return base.rstrip("/") + "/search"
 
 

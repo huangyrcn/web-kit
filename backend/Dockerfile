@@ -49,10 +49,11 @@ RUN mkdir -p /etc/searxng-default \
 # App code
 WORKDIR /app
 COPY server.py /app/server.py
-COPY start-xvfb.sh start-chrome.sh start-searxng.sh watchdog.sh healthcheck.sh /usr/local/bin/
+COPY start-xvfb.sh start-chrome.sh start-searxng.sh start-vnc.sh watchdog.sh healthcheck.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/start-xvfb.sh \
              /usr/local/bin/start-chrome.sh \
              /usr/local/bin/start-searxng.sh \
+             /usr/local/bin/start-vnc.sh \
              /usr/local/bin/watchdog.sh \
              /usr/local/bin/healthcheck.sh
 
