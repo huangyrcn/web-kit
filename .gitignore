@@ -1,0 +1,28 @@
+# Build artifacts
+*.pyc
+__pycache__/
+*.egg-info/
+.venv/
+venv/
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*~
+
+# Local overrides — users keep their real settings here, never committed
+searxng-settings/settings.yml
+.env
+.env.local
+secrets.yml
+
+# Runtime / probe artifacts
+chrome-profile/
+*.log
+bench/results/
+/tmp/probe.json
+
+# Docker compose override
+docker-compose.override.yml

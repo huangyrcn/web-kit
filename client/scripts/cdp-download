@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""
+Download files via Chrome DevTools Protocol (CDP).
+
+Uses Network.loadNetworkResource + IO.read to download files through a remote
+Chrome instance. Supports authentication/cookies via includeCredentials.
+
+Usage:
+    cdp-download <url> [output_file]
+    cdp-download https://arxiv.org/pdf/2002.05287.pdf paper.pdf
+
+Environment:
+    CDP_URL - Chrome DevTools Protocol endpoint (required, e.g. http://localhost:9223)
+"""
+
+import sys
+import os
+import json
+import base64
+import urllib.request
+import urllib.parse
+import websocket
+
+
+def get_cdp_url():
+    """Get CDP URL from environment variable."""
+    url = os.environ.get("CDP_URL")
+    if not url:
+        print("Error: CDP_URL environment variable is required", file=sys.stderr)
+        print("  export CDP_URL=http://your-cdp-host:9223", file=sys.stderr)
+        sys.exit(1)
+    return url
+
+
+def get_page_ws_url(cdp_url):
+    """Get WebSocket URL for a page target."""
+    targets_url = f"{cdp_url}/json"
+    try:
+        targets = json.loads(urllib.request.urlopen(targets_url, timeout=10).read())
+    except Exception as e:
+        raise RuntimeError(f"Failed to connect to CDP at {cdp_url}: {e}")
+
+    # Find existing page or create one
+    for t in targets:
+        if t.get("type") == "page":
+            return t["webSocketDebuggerUrl"]
+
+    # No page found, get browser WS and create a page
+    version_url = f"{cdp_url}/json/version"
+    browser_info = json.loads(urllib.request.urlopen(version_url, timeout=10).read())
+    browser_ws = browser_info["webSocketDebuggerUrl"]
+
+    ws = websocket.create_connection(browser_ws)
+    ws.send(json.dumps({"id": 1, "method": "Target.createTarget", "params": {"url": "about:blank"}}))
+    result = json.loads(ws.recv())
+    ws.close()
+
+    if "result" not in result:
+        raise RuntimeError(f"Failed to create page: {result}")
+
+    # Wait and get new page WS
+    import time
+    time.sleep(0.5)
+    targets = json.loads(urllib.request.urlopen(targets_url, timeout=10).read())
+    for t in targets:
+        if t.get("type") == "page":
+            return t["webSocketDebuggerUrl"]
+
+    raise RuntimeError("Failed to get page WebSocket URL")
+
+
+def download(url, output_path=None, cdp_url=None):
+    """Download a file via CDP."""
+    if cdp_url is None:
+        cdp_url = get_cdp_url()
+
+    # Get output filename
+    if output_path is None:
+        # Extract filename from URL
+        parsed = urllib.parse.urlparse(url)
+        filename = os.path.basename(parsed.path)
+        if not filename:
+            filename = "download"
+        output_path = filename
+
+    # Connect to page
+    ws_url = get_page_ws_url(cdp_url)
+    ws = websocket.create_connection(ws_url)
+
+    try:
+        # Get frameId
+        ws.send(json.dumps({"id": 1, "method": "Page.getFrameTree"}))
+        result = json.loads(ws.recv())
+        frame_id = result["result"]["frameTree"]["frame"]["id"]
+
+        # Load resource
+        ws.send(json.dumps({
+            "id": 2,
+            "method": "Network.loadNetworkResource",
+            "params": {
+                "frameId": frame_id,
+                "url": url,
+                "options": {
+                    "disableCache": True,
+                    "includeCredentials": True
+                }
+            }
+        }))
+
+        result = json.loads(ws.recv())
+
+        if "error" in result:
+            raise RuntimeError(f"CDP error: {result['error']}")
+
+        resource = result["result"]["resource"]
+
+        if not resource.get("success"):
+            raise RuntimeError(f"Failed to load resource: HTTP {resource.get('httpStatusCode')}")
+
+        http_status = resource.get("httpStatusCode", 0)
+        headers = resource.get("headers", {})
+        content_length = headers.get("content-length", "unknown")
+        content_type = headers.get("content-type", "unknown")
+
+        print(f"HTTP {http_status}")
+        print(f"Content-Type: {content_type}")
+        print(f"Content-Length: {content_length}")
+
+        if "stream" not in resource:
+            raise RuntimeError("No stream in response")
+
+        stream_handle = resource["stream"]
+
+        # Read stream
+        data = b""
+        msg_id = 3
+        while True:
+            ws.send(json.dumps({
+                "id": msg_id,
+                "method": "IO.read",
+                "params": {
+                    "handle": stream_handle,
+                    "size": 1024 * 1024  # 1MB chunks
+                }
+            }))
+            msg_id += 1
+            read_result = json.loads(ws.recv())
+
+            if "error" in read_result:
+                raise RuntimeError(f"IO.read error: {read_result['error']}")
+
+            chunk = read_result["result"]
+            if chunk.get("base64Encoded"):
+                data += base64.b64decode(chunk["data"])
+            else:
+                data += chunk["data"].encode()
+
+            # Progress
+            if content_length != "unknown":
+                total = int(content_length)
+                percent = len(data) * 100 // total
+                print(f"\rDownloading: {percent}% ({len(data)}/{total} bytes)", end="", flush=True)
+
+            if chunk.get("eof"):
+                break
+
+        print()  # New line after progress
+
+        # Save file
+        with open(output_path, "wb") as f:
+            f.write(data)
+
+        print(f"Saved: {output_path} ({len(data)} bytes)")
+        return output_path
+
+    finally:
+        ws.close()
+
+
+def main():
+    if len(sys.argv) < 2:
+        print(__doc__)
+        sys.exit(1)
+
+    url = sys.argv[1]
+    output_path = sys.argv[2] if len(sys.argv) > 2 else None
+    cdp_url = get_cdp_url()
+
+    try:
+        download(url, output_path, cdp_url)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

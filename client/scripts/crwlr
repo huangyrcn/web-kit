@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# web-kit/scripts/crwlr — wrapper for crwl with remote browser config
+#
+# Environment variables:
+#   CDP_URL        — Chrome DevTools Protocol endpoint (required)
+#   CRWL_BIN       — Override underlying crwl executable path
+#
+# Usage:
+#   crwlr [crwl args...]           # Use remote browser via CDP
+#   crwlr --raw [crwl args...]     # Call crwl directly (local browser)
+
+REAL_CRWL="${CRWL_BIN:-crwl}"
+
+show_help() {
+  cat <<'EOF'
+crwlr — crwl wrapper with remote browser via CDP
+
+Usage:
+  crwlr crawl -o md "https://example.com"    # Render page, output markdown
+  crwlr --raw crawl -o md "..."              # Use local browser instead
+
+Environment:
+  CDP_URL        Chrome DevTools Protocol endpoint (required, e.g. http://localhost:9223)
+  CRWL_BIN       Override crwl executable path
+
+Examples:
+  export CDP_URL=http://localhost:9223
+  crwlr crawl -o md "https://arxiv.org/abs/2002.05287"
+  crwlr crawl -q "what is this paper about?" "https://arxiv.org/abs/2002.05287"
+EOF
+}
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  show_help
+  exit 0
+fi
+
+if [[ "${1:-}" == "--raw" ]]; then
+  shift
+  exec "$REAL_CRWL" "$@"
+fi
+
+# CDP_URL is required
+if [[ -z "${CDP_URL:-}" ]]; then
+  echo "crwlr: CDP_URL environment variable is required" >&2
+  echo "  export CDP_URL=http://your-cdp-host:9223" >&2
+  exit 1
+fi
+
+# Generate browser config YAML with CDP_URL from environment
+BROWSER_CFG=$(mktemp --suffix=.yml)
+cat > "$BROWSER_CFG" <<EOF
+browser_type: chromium
+browser_mode: custom
+cdp_url: ${CDP_URL}
+EOF
+
+# Cleanup temp file on exit
+trap 'rm -f "$BROWSER_CFG"' EXIT
+
+# Check if -B is already in args
+has_B=0
+for arg in "$@"; do
+  if [[ "$arg" == "-B" ]]; then
+    has_B=1
+    break
+  fi
+done
+
+if [[ "$has_B" -eq 1 ]]; then
+  exec "$REAL_CRWL" "$@"
+else
+  # Insert -B after first arg (the subcommand, usually "crawl")
+  if [[ $# -gt 0 ]]; then
+    exec "$REAL_CRWL" "$1" -B "$BROWSER_CFG" "${@:2}"
+  else
+    exec "$REAL_CRWL" "$@"
+  fi
+fi

@@ -1,0 +1,239 @@
+use_default_settings: true
+server:
+  secret_key: 'CHANGE_ME_e.g._run_openssl_rand_-hex_32'
+  limiter: false
+  image_proxy: true
+  methods: ['GET', 'POST']
+
+redis:
+  url: false
+
+search:
+  default_lang: "en"
+  formats: ['html', 'csv', 'json', 'rss']
+  suspended_times:
+    SearxEngineAccessDenied: 60
+    SearxEngineCaptcha: 120
+    SearxEngineTooManyRequests: 60
+    cf_SearxEngineCaptcha: 300
+    cf_SearxEngineAccessDenied: 300
+    recaptcha_SearxEngineCaptcha: 300
+
+outgoing:
+  request_timeout: 8.0
+  pool_connections: 100
+  pool_maxsize: 20
+  enable_http2: true
+
+engines:
+  # === General search (3 engines) ===
+  - name: google
+    engine: json_engine
+    shortcut: go
+    search_url: http://localhost:3100/google?q={query}&limit=10
+    enable_http: true
+    results_query: results
+    url_query: url
+    title_query: title
+    content_query: content
+    categories: [general]
+    disabled: false
+    timeout: 15.0
+    paging: false
+
+  - name: bing
+    engine: bing
+    disabled: false
+    send_accept_language_header: true
+
+  - name: duckduckgo
+    engine: json_engine
+    shortcut: dd
+    search_url: http://localhost:3100/ddg?q={query}&limit=10
+    enable_http: true
+    results_query: results
+    url_query: url
+    title_query: title
+    content_query: content
+    categories: [general]
+    disabled: false
+    timeout: 20.0
+    paging: false
+
+  # === Science search (6 engines) ===
+  - name: semantic scholar
+    engine: semantic_scholar_api
+    shortcut: se
+    api_key: "YOUR_SEMANTIC_SCHOLAR_API_KEY"
+    disabled: false
+
+  - name: arxiv
+    engine: arxiv
+    shortcut: arx
+    disabled: false
+
+  - name: google scholar
+    engine: google_scholar
+    shortcut: gos
+    disabled: false
+
+  - name: openalex
+    engine: openalex
+    disabled: false
+
+  - name: dblp
+    engine: dblp
+    shortcut: dblp
+    disabled: false
+
+  - name: pubmed
+    engine: pubmed
+    shortcut: pm
+    disabled: false
+
+  # === Disabled engines (explicit) ===
+  - name: base
+    engine: base
+    shortcut: bas
+    disabled: true
+
+  - name: crossref
+    engine: crossref
+    disabled: true
+
+  - name: core
+    engine: core
+    shortcut: core
+    api_key: "YOUR_CORE_API_KEY"
+    disabled: true
+
+  - name: doaj
+    engine: doaj
+    shortcut: doaj
+    disabled: true
+
+  - name: pdbe
+    engine: pdbe
+    shortcut: pdb
+    disabled: true
+
+  - name: openairedatasets
+    disabled: true
+
+  - name: openairepublications
+    disabled: true
+
+  - name: brave
+    engine: brave
+    disabled: true
+
+  - name: startpage
+    engine: startpage
+    disabled: true
+
+  - name: qwant
+    engine: qwant
+    disabled: true
+
+  - name: mojeek
+    engine: mojeek
+    disabled: true
+
+  - name: yahoo
+    engine: yahoo
+    disabled: true
+
+  - name: yandex
+    engine: yandex
+    disabled: true
+
+  - name: wikipedia
+    engine: wikipedia
+    disabled: true
+
+  - name: openlibrary
+    engine: openlibrary
+    disabled: true
+
+  - name: stackexchange
+    engine: stackexchange
+    shortcut: stx
+    disabled: true
+
+  # === IT & dev ===
+  - name: github
+    engine: github
+    shortcut: gh
+    disabled: false
+
+  - name: github code
+    engine: github_code
+    shortcut: ghc
+    disabled: false
+    ghc_auth:
+      type: "token"
+      token: "YOUR_GITHUB_PERSONAL_ACCESS_TOKEN"
+
+  - name: hackernews
+    engine: hackernews
+    disabled: false
+
+  - name: gitlab
+    engine: gitlab
+    disabled: false
+
+  - name: huggingface
+    engine: huggingface
+    disabled: false
+
+  - name: npm
+    engine: npm
+    disabled: false
+
+  - name: crates.io
+    engine: crates
+    disabled: false
+
+  - name: lib.rs
+    engine: lib_rs
+    disabled: false
+
+  - name: pkg.go.dev
+    engine: pkg_go_dev
+    disabled: false
+
+  - name: sourcehut
+    engine: sourcehut
+    disabled: false
+
+  - name: microsoft learn
+    engine: microsoft_learn
+    disabled: false
+
+  - name: nvd
+    engine: nvd
+    disabled: false
+
+  - name: pypi
+    engine: pypi
+    disabled: false
+
+  # === Books/library ===
+  - name: annas archive
+    engine: annas_archive
+    disabled: false
+
+  - name: zlibrary
+    engine: zlibrary
+    shortcut: zlib
+    disabled: false
+
+  # === Social/discussion ===
+  - name: reddit
+    engine: reddit
+    disabled: false
+
+  - name: wikidata
+    engine: wikidata
+    shortcut: wd
+    disabled: false

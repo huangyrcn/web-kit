@@ -1,0 +1,26 @@
+services:
+  web-kit-backend:
+    image: web-kit-backend:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: web-kit-backend
+    restart: unless-stopped
+    shm_size: "1gb"
+    mem_limit: 4g
+    ports:
+      - "0.0.0.0:8082:8080"   # SearxNG  (web-kit ask-search)
+      - "0.0.0.0:9223:9223"   # Chrome CDP (web-kit crwlr / cdp-download)
+      - "0.0.0.0:6080:6080"   # noVNC (manual cookie login)
+    volumes:
+      - ./searxng-settings:/etc/searxng:rw
+      - chrome-profile:/data/chrome-profile
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 3
+
+volumes:
+  chrome-profile:
