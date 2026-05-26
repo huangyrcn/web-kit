@@ -26,17 +26,20 @@ allowed-tools: Bash
 本 skill 随附的脚本位于 `scripts/` 目录，调用时需使用完整路径：
 
 ```bash
+${SKILL_DIR}/scripts/ask-search "query"
 ${SKILL_DIR}/scripts/crwlr crawl -o md "<url>"
 ${SKILL_DIR}/scripts/cdp-download <url> [output]
 ```
 
 或相对于 skill 目录：
 ```bash
+scripts/ask-search "query"
 scripts/crwlr crawl -o md "<url>"
 scripts/cdp-download <url> output.pdf
 ```
 
-`ask-search` 为独立安装的命令行工具，直接调用即可。
+Python 脚本（`ask-search`、`crwlr`、`cdp-download`）通过 [`uv run --script`](https://docs.astral.sh/uv/guides/scripts/)
+执行，依赖声明在脚本头部（PEP 723），首次运行时 `uv` 自动安装。系统需预装 `uv`。
 
 ---
 
@@ -44,7 +47,7 @@ scripts/cdp-download <url> output.pdf
 
 | 场景 | 命令 |
 |---|---|
-| 搜索 | `ask-search "query"` |
+| 搜索 | `${SKILL_DIR}/scripts/ask-search "query"` |
 | 读网页 | `${SKILL_DIR}/scripts/crwlr crawl -o md "<url>"` |
 | 下载文件 | `wget <url>` 或 `curl -O <url>` |
 | 下载文件（认证失败时） | `${SKILL_DIR}/scripts/cdp-download <url> [output]` |
@@ -56,13 +59,13 @@ scripts/cdp-download <url> output.pdf
 ## ask-search 速查
 
 ```bash
-ask-search "query"                        # 默认 10 条（聚合所有引擎）
-ask-search "query" -n 5                   # 限制数量
-ask-search "query" -c news                # 仅新闻
-ask-search "query" -c science             # 学术搜索（arxiv, scholar, pubmed 等）
-ask-search "query" -l zh-CN               # 中文结果
-ask-search "query" -u                     # 只返回 URL 列表
-ask-search "query" -j                     # 原始 JSON
+${SKILL_DIR}/scripts/ask-search "query"                        # 默认 10 条（聚合所有引擎）
+${SKILL_DIR}/scripts/ask-search "query" -n 5                   # 限制数量
+${SKILL_DIR}/scripts/ask-search "query" -c news                # 仅新闻
+${SKILL_DIR}/scripts/ask-search "query" -c science             # 学术搜索（arxiv, scholar, pubmed 等）
+${SKILL_DIR}/scripts/ask-search "query" -l zh-CN               # 中文结果
+${SKILL_DIR}/scripts/ask-search "query" -u                     # 只返回 URL 列表
+${SKILL_DIR}/scripts/ask-search "query" -j                     # 原始 JSON
 ```
 
 ### 按场景选引擎（`-e` 用法）
@@ -72,19 +75,19 @@ ask-search "query" -j                     # 原始 JSON
 
 ```bash
 # 学术调研（走 API，不经 Chrome）
-ask-search "graph neural network survey" -e arxiv,openalex,semantic_scholar
+${SKILL_DIR}/scripts/ask-search "graph neural network survey" -e arxiv,openalex,semantic_scholar
 
 # 代码 / 仓库（走各自 API）
-ask-search "react hooks lifecycle" -e github,github_code,stackexchange
+${SKILL_DIR}/scripts/ask-search "react hooks lifecycle" -e github,github_code,stackexchange
 
 # 通用网页搜索但绕过 Chrome
-ask-search "openwrt clash docker" -e bing,brave
+${SKILL_DIR}/scripts/ask-search "openwrt clash docker" -e bing,brave
 
 # 社区 / 讨论
-ask-search "k8s ingress nginx tradeoffs" -e reddit,hackernews
+${SKILL_DIR}/scripts/ask-search "k8s ingress nginx tradeoffs" -e reddit,hackernews
 
 # 包管理器
-ask-search "fastapi" -e pypi,npm,crates,pkg_go_dev
+${SKILL_DIR}/scripts/ask-search "fastapi" -e pypi,npm,crates,pkg_go_dev
 ```
 
 可用引擎完整列表见 `references/engines.md`。
@@ -95,7 +98,7 @@ ask-search "fastapi" -e pypi,npm,crates,pkg_go_dev
 - **代码/包**：`-e github,github_code,pypi,npm,...` —— 走 API，没结果就是真没结果，不会挂。
 - **通用网页搜索**：**不要只用 `-e bing,brave`**。bing 直连偶发 connection error，brave 也一样。
 要么用默认（聚合所有），要么用 `-e google,duckduckgo,bing,brave` 多路冗余。
-- 当 ask-search 返回 `no_results` 且 `unresponsive_engines` 非空时，调用方应该
+- 当 `ask-search` 返回 `no_results` 且 `unresponsive_engines` 非空时，调用方应该
 **换不同 engine 集合重试**，而不是认为"没匹配"。
 
 环境变量：`SEARXNG_URL`（必须配置，如 `http://localhost:8082`）
@@ -174,8 +177,7 @@ ${SKILL_DIR}/scripts/crwlr crawl -o md "https://eutils.ncbi.nlm.nih.gov/entrez/e
 ## cdp-download 速查
 
 通过 CDP 下载文件（PDF 等），使用 `Network.loadNetworkResource` + `IO.read`。
-
-**适用场景**：仅当 `wget` 或 `curl` 下载失败时使用（如需要浏览器认证/cookie）。
+仅当 `wget` 或 `curl` 下载失败时使用（如需要浏览器认证/cookie）。
 
 ```bash
 ${SKILL_DIR}/scripts/cdp-download <url>                   # 下载到当前目录（自动命名）
@@ -184,19 +186,16 @@ ${SKILL_DIR}/scripts/cdp-download <url> output.pdf       # 下载到指定文件
 
 环境变量：`CDP_URL`（必须配置）
 
-**使用场景**：仅当 `wget`/`curl` 失败时使用（如需要浏览器认证/cookie）。
-
 **优势**：
 - 支持认证/cookie（`includeCredentials: true`）
 - 流式读取，适合大文件
 - 不受 PDF viewer 插件干扰
 
-**适用场景**：下载需要浏览器认证的文件、PDF、二进制资源。
-
 ## Scripts 索引
 
 | 脚本 | 用途 |
 |---|---|
+| `scripts/ask-search` | SearxNG 多引擎搜索 |
 | `scripts/crwlr` | 渲染页面、提取内容 |
 | `scripts/cdp-download` | 通过 CDP 下载文件 |
 

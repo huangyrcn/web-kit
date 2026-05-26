@@ -43,9 +43,9 @@ Compared to a vanilla agent's built-in web tools, this skill gives:
 
 ### Install (Claude Code example)
 
-The skill scripts have two runtime dependencies you must install yourself:
-**`crwl`** (the underlying browser automation tool from `crawl4ai`) and the
-**`websocket-client`** Python package (used by `cdp-download` to talk to CDP).
+One runtime dependency: [`uv`](https://docs.astral.sh/uv/) — runs all Python
+scripts and auto-installs their inline dependencies (crawl4ai, websocket-client,
+etc.) on first use.
 
 ```bash
 # 1. Clone the repo and copy the skill into your skills dir
@@ -53,21 +53,16 @@ git clone https://github.com/huangyrcn/web-kit.git
 cp -r web-kit/skill ~/.claude/skills/web-kit
 chmod +x ~/.claude/skills/web-kit/scripts/*
 
-# 2. Install the Python dependency
-pip install -r ~/.claude/skills/web-kit/requirements.txt
+# 2. Install uv (if not already installed)
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 3. Install crwl (the browser automation CLI used by `crwlr`)
-#    See https://github.com/unclecode/crawl4ai for full install options.
-pip install -U crawl4ai
-crawl4ai-setup     # downloads the bundled browser config
-
-# 4. Tell the skill where its backend lives
+# 3. Tell the skill where its backend lives
 export SEARXNG_URL=http://your-host:8082
 export CDP_URL=http://your-host:9223
 
-# 5. Smoke test
-ask-search "hello world" -n 3
-crwlr crawl -o md "https://example.com"
+# 4. Smoke test
+~/.claude/skills/web-kit/scripts/ask-search "hello world" -n 3
+~/.claude/skills/web-kit/scripts/crwlr crawl -o md "https://example.com"
 ```
 
 For Copilot CLI, Gemini CLI, or other platforms, see `skill/SKILL.md` — the doc lists
@@ -103,9 +98,9 @@ processes and **four layers of self-healing**:
 2. **Application-level** — `_ensure_browser()` reconnects CDP on each request if
    the underlying Chrome crashed in between.
 3. **Container-level** — Docker `HEALTHCHECK` probes all three exposed ports.
-4. **Business-level** — `watchdog.sh` runs a real search every 60s and triggers
-   `supervisorctl restart chrome search-proxy` after 3 consecutive failures
-   (catches "process alive but browser hung").
+4. **Business-level** — `watchdog.sh` probes internal health every 300s and
+   triggers `supervisorctl restart chrome search-proxy` after 3 consecutive
+   failures (catches "process alive but browser hung").
 
 ### Quick start
 
@@ -174,7 +169,7 @@ on a network you don't trust.
    │  SearxNG (granian :8080) ── http://localhost:3100/{google,ddg}      │
    │       └─► host:8082                                                 │
    │                                                                     │
-   │  watchdog.sh (60s probe) ── supervisorctl restart on failure        │
+   │  watchdog.sh (300s probe) ── supervisorctl restart on failure       │
    │                                                                     │
    └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -240,7 +235,7 @@ python3 backend/bench/speed-test.py -n 8 --target http://localhost:8082
 | `docker-compose.yml` `shm_size` | `/dev/shm` for Chrome | 1 GB |
 | env `SEARCH_PROXY_CONCURRENCY` | parallel Chrome pages | 3 |
 | env `FAILURE_CACHE_SECONDS` | engine quarantine duration | 60s |
-| env `PROBE_INTERVAL` | watchdog probe interval | 60s |
+| env `PROBE_INTERVAL` | watchdog probe interval | 300s |
 
 ---
 
@@ -251,7 +246,7 @@ python3 backend/bench/speed-test.py -n 8 --target http://localhost:8082
 ├── skill/                       ← the AI skill bundle
 │   ├── SKILL.md
 │   ├── scripts/
-│   │   ├── ask-search.py
+│   │   ├── ask-search
 │   │   ├── crwlr
 │   │   └── cdp-download
 │   └── references/
