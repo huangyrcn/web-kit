@@ -126,83 +126,136 @@ app = FastAPI(lifespan=lifespan)
 
 # ─── Google ────────────────────────────────────────────────────────────────────
 
-def _clean_google_url(href: str) -> str | None:
+def _clean_google_url(href: str | None) -> str | None:
     if not href:
         return None
-    if href.startswith("/url?"):
+    if href.startswith("/url?") or href.startswith("https://www.google.com/url?"):
         parsed = parse_qs(urlparse(href).query)
         if "q" in parsed:
-            return parsed["q"][0]
-    if href.startswith("http") and "google.com" not in href:
+            target = parsed["q"][0]
+            host = (urlparse(target).hostname or "") if target.startswith("http") else ""
+            if host and "google." not in host and not host.endswith("googleusercontent.com"):
+                return target
+        return None
+    if href.startswith("http"):
+        host = urlparse(href).hostname or ""
+        if "google." in host or host.endswith("googleusercontent.com"):
+            return None
         return href
     return None
 
 
+_GOOGLE_EXTRACT_JS = r"""
+() => {
+  const out = [];
+  const seen = new Set();
+  const containerSelectors = [
+    '#search div[data-hveid]',
+    '#rso .g',
+    '#rso div[data-hveid]',
+    '#search a:has(h3)',
+    '#rso a:has(h3)',
+  ];
+  let nodes = [];
+  for (const sel of containerSelectors) {
+    const found = document.querySelectorAll(sel);
+    if (found.length) { nodes = Array.from(found); break; }
+  }
+  if (!nodes.length) {
+    nodes = Array.from(document.querySelectorAll('#search a[href]')).filter(a => a.querySelector('h3'));
+  }
+  const snippetSelectors = [
+    '.VwiC3b', "[data-sncf='1']", "div[style*='webkit-line-clamp']",
+    "div[role='text']", '.lEBKkf', '.MUxGbd',
+  ];
+  for (const node of nodes) {
+    const h3 = node.querySelector('h3');
+    if (!h3) continue;
+    const title = (h3.innerText || '').trim();
+    if (!title) continue;
+    let href = null;
+    if (node.tagName === 'A' && node.href) {
+      href = node.href;
+    } else {
+      const a = node.querySelector('a[href]');
+      if (a) href = a.href || a.getAttribute('href');
+      if (!href) {
+        const closestA = h3.closest('a');
+        if (closestA) href = closestA.href || closestA.getAttribute('href');
+      }
+    }
+    if (!href || seen.has(href)) continue;
+    seen.add(href);
+    let snippet = '';
+    for (const sel of snippetSelectors) {
+      const s = node.querySelector(sel);
+      if (s && s.innerText && s.innerText.trim()) {
+        snippet = s.innerText.trim().replace(/\s+/g, ' ');
+        break;
+      }
+    }
+    out.push({ title, href, snippet });
+  }
+  return out;
+}
+"""
+
+
 async def _parse_google(page, limit: int) -> list[dict]:
-    results = []
+    results: list[dict] = []
     try:
-        await page.wait_for_selector("#search", timeout=10000)
+        await page.wait_for_selector("#search, #rso, #main", timeout=10000)
     except Exception:
-        logger.warning("Google: timeout waiting for #search")
+        logger.warning("Google: timeout waiting for results container")
         return results
 
-    containers = await page.query_selector_all("#search div[data-hveid]")
-    if not containers:
-        containers = await page.query_selector_all("#rso .g")
-    if not containers:
-        containers = await page.query_selector_all("#rso div[data-hveid]")
+    try:
+        raw = await page.evaluate(_GOOGLE_EXTRACT_JS)
+    except Exception as e:
+        logger.warning("Google: structured extraction failed: %s", e)
+        raw = []
 
-    for container in containers:
+    seen_urls: set[str] = set()
+    for item in raw or []:
         if len(results) >= limit:
             break
-        h3 = await container.query_selector("h3")
-        if not h3:
+        try:
+            url = _clean_google_url(item.get("href"))
+            if not url or url in seen_urls:
+                continue
+            title = (item.get("title") or "").strip()
+            if not title:
+                continue
+            seen_urls.add(url)
+            results.append({
+                "title": title,
+                "url": url,
+                "content": (item.get("snippet") or "").strip(),
+            })
+        except Exception as e:
+            logger.debug("Google: skipping malformed item: %s", e)
             continue
-        title = (await h3.inner_text()).strip()
-        if not title:
-            continue
-
-        url = None
-        anchor = await container.query_selector("a[href]")
-        if anchor:
-            href = await anchor.get_attribute("href")
-            url = _clean_google_url(href)
-        if not url:
-            parent = await h3.evaluate_handle("el => el.closest('a')")
-            if parent:
-                href = await parent.evaluate("el => el.href")
-                url = _clean_google_url(href)
-        if not url:
-            continue
-
-        content = ""
-        for sel in [".VwiC3b", "[data-sncf='1']", "div[style*='webkit-line-clamp']", "div[role='text']"]:
-            snippet_el = await container.query_selector(sel)
-            if snippet_el:
-                content = (await snippet_el.inner_text()).strip()
-                content = " ".join(content.split())
-                if content:
-                    break
-
-        parsed = urlparse(url)
-        if parsed.hostname and "google" in parsed.hostname:
-            continue
-        if any(r["url"] == url for r in results):
-            continue
-
-        results.append({"title": title, "url": url, "content": content})
 
     if not results:
-        anchors = await page.query_selector_all("#search a[href^='http']")
+        try:
+            anchors = await page.query_selector_all("#search a[href^='http'], #rso a[href^='http']")
+        except Exception:
+            anchors = []
         for a in anchors:
             if len(results) >= limit:
                 break
-            href = await a.get_attribute("href")
-            if not href or "google.com" in href:
+            try:
+                href = await a.get_attribute("href")
+                url = _clean_google_url(href)
+                if not url or url in seen_urls:
+                    continue
+                text = (await a.inner_text()).strip()
+                if not text or len(text) <= 5:
+                    continue
+                seen_urls.add(url)
+                results.append({"title": text, "url": url, "content": ""})
+            except Exception:
                 continue
-            text = (await a.inner_text()).strip()
-            if text and len(text) > 5:
-                results.append({"title": text, "url": href, "content": ""})
 
     return results
 
