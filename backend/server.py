@@ -27,7 +27,7 @@ from patchright.async_api import async_playwright
 CDP_URL = os.environ.get("CDP_URL", "http://localhost:9222")
 PORT = int(os.environ.get("PORT", "3100"))
 MAX_CONCURRENCY = int(os.environ.get("SEARCH_PROXY_CONCURRENCY", "3"))
-FAILURE_CACHE_SECONDS = int(os.environ.get("FAILURE_CACHE_SECONDS", "60"))
+FAILURE_CACHE_SECONDS = int(os.environ.get("FAILURE_CACHE_SECONDS", "15"))
 
 logger = logging.getLogger("search-proxy")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -42,6 +42,26 @@ _failure_cache: dict[str, float] = {}
 # Without this, every /open call leaks a new page target into Chrome.
 _manual_page = None
 _manual_page_lock = asyncio.Lock()
+
+
+async def _warmup_browser(browser):
+    """After CDP (re)connect, do a quick page round-trip to ensure Chrome is
+    responsive. Without this the first real search request can hit
+    ERR_CONNECTION_RESET because the browser isn't fully initialised yet."""
+    page = None
+    try:
+        ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
+        page = await ctx.new_page()
+        await page.goto("about:blank", timeout=5000)
+        logger.info("Browser warmup OK")
+    except Exception as e:
+        logger.warning("Browser warmup failed (non-fatal): %s", e)
+    finally:
+        if page is not None:
+            try:
+                await page.close()
+            except Exception:
+                pass
 
 
 async def _ensure_browser():
@@ -68,6 +88,7 @@ async def _ensure_browser():
                 _pw = await async_playwright().start()
                 _browser = await _pw.chromium.connect_over_cdp(CDP_URL)
                 logger.info("Connected to Chrome via CDP (attempt %d)", attempt + 1)
+                await _warmup_browser(_browser)
                 return _browser
             except Exception as e:
                 last_err = e
@@ -284,7 +305,20 @@ async def search_google(q: str = Query(..., min_length=1), limit: int = Query(10
         ctx = await _get_context(browser)
         page = await ctx.new_page()
         url = f"https://www.google.com/search?q={quote_plus(q)}&num={limit}&hl=en"
-        await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+
+        # Retry once on transient connection errors (e.g. cold-start)
+        _transient = ("ERR_CONNECTION_CLOSED", "ERR_CONNECTION_RESET",
+                      "ERR_CONNECTION_REFUSED", "ERR_NAME_NOT_RESOLVED")
+        for attempt in range(2):
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                break
+            except Exception as e:
+                if attempt == 0 and any(t in str(e) for t in _transient):
+                    logger.warning("Google: transient error on attempt 1, retrying: %s", e)
+                    await asyncio.sleep(2)
+                    continue
+                raise
 
         page_content = await page.content()
         if "unusual traffic" in page_content.lower() or "captcha" in page_content.lower():
@@ -404,7 +438,20 @@ async def search_ddg(q: str = Query(..., min_length=1), limit: int = Query(10, g
         ctx = await _get_context(browser)
         page = await ctx.new_page()
         url = f"https://html.duckduckgo.com/html/?q={quote_plus(q)}"
-        await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+
+        # Retry once on transient connection errors (e.g. cold-start)
+        _transient = ("ERR_CONNECTION_CLOSED", "ERR_CONNECTION_RESET",
+                      "ERR_CONNECTION_REFUSED", "ERR_NAME_NOT_RESOLVED")
+        for attempt in range(2):
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                break
+            except Exception as e:
+                if attempt == 0 and any(t in str(e) for t in _transient):
+                    logger.warning("DDG: transient error on attempt 1, retrying: %s", e)
+                    await asyncio.sleep(2)
+                    continue
+                raise
 
         results = await _parse_ddg(page, limit)
         return {"query": q, "engine": "duckduckgo", "results": results}
@@ -461,6 +508,7 @@ async def open_url(url: str = Query(...)):
         try:
             await _manual_page.goto(url, timeout=30000)
         except Exception as e:
+            _manual_page = None
             return JSONResponse({"error": f"goto failed: {e}", "url": url}, status_code=502)
 
     return {"status": "opened", "url": url, "hint": "Use VNC on port 6080 to interact"}
