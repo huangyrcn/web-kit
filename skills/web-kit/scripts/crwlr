@@ -71,9 +71,9 @@ async def run_crawl(args):
         AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode,
     )
 
-    cdp_url = os.environ.get("CDP_URL")
+    cdp_url = os.environ.get("CDP_URL") or os.environ.get("CLAUDE_PLUGIN_OPTION_CDP_URL")
     if not cdp_url:
-        print("crwlr: CDP_URL environment variable is required", file=sys.stderr)
+        print("crwlr: CDP_URL environment variable or plugin config is required", file=sys.stderr)
         print("  export CDP_URL=http://your-cdp-host:9223", file=sys.stderr)
         sys.exit(1)
 

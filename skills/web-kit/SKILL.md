@@ -23,19 +23,12 @@ allowed-tools: Bash
 
 ## 脚本路径
 
-本 skill 随附的脚本位于 `scripts/` 目录，调用时需使用完整路径：
+本 skill 随附的脚本位于 `scripts/` 目录，调用时使用 `${SKILL_DIR}` 前缀：
 
 ```bash
 ${SKILL_DIR}/scripts/ask-search "query"
 ${SKILL_DIR}/scripts/crwlr crawl -o md "<url>"
 ${SKILL_DIR}/scripts/cdp-download <url> [output]
-```
-
-或相对于 skill 目录：
-```bash
-scripts/ask-search "query"
-scripts/crwlr crawl -o md "<url>"
-scripts/cdp-download <url> output.pdf
 ```
 
 Python 脚本（`ask-search`、`crwlr`、`cdp-download`）通过 [`uv run --script`](https://docs.astral.sh/uv/guides/scripts/)
