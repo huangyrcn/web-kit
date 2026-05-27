@@ -24,6 +24,15 @@ Environment:
 """
 import sys, json, urllib.parse, urllib.request, urllib.error, argparse, os, socket, ssl, threading
 
+# Fix UnicodeEncodeError on Windows with non-UTF-8 system locales (e.g. zh-CN/GBK).
+if sys.platform == "win32":
+    os.environ.setdefault("PYTHONUTF8", "1")
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except AttributeError:
+        pass
+
 VERSION = "1.1.0"
 
 # --- Tavily support (opt-in via SEARCH_PROVIDER=tavily + TAVILY_API_KEY) ---
