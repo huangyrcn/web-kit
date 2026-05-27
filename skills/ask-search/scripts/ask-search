@@ -22,7 +22,7 @@ Environment:
                 — matches the host-side port that backend/docker-compose.yml exposes.
                 Set this if your backend is on a different host or port.
 """
-import sys, json, urllib.parse, argparse, os, subprocess
+import sys, json, urllib.parse, urllib.request, urllib.error, argparse, os, socket, ssl, threading
 
 VERSION = "1.1.0"
 
@@ -51,20 +51,22 @@ def _search_url():
     return base.rstrip("/") + "/search"
 
 
-def _classify_curl_error(returncode: int, stderr: str) -> str:
-    """Map curl exit code + stderr to a typed error_type."""
-    s = stderr.lower()
-    if returncode == 28 or "operation timed out" in s or "timeout" in s:
-        return "timeout"
-    if returncode == 7 or "connection refused" in s or "couldn't connect" in s:
-        return "backend_unreachable"
-    if returncode == 6 or "could not resolve host" in s:
-        return "dns"
-    if returncode == 35 or "ssl" in s:
-        return "tls"
-    if returncode != 0:
-        return "network_error"
-    return "ok"
+def _run_with_timeout(fn, timeout):
+    """Run fn() in a thread with a wall-clock timeout. Returns result or raises."""
+    result, error = [], []
+    def target():
+        try:
+            result.append(fn())
+        except Exception as e:
+            error.append(e)
+    t = threading.Thread(target=target, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        raise socket.timeout("timed out")
+    if error:
+        raise error[0]
+    return result[0]
 
 
 def search(query, num=10, engines=None, lang=None, categories=None, timeout=30):
@@ -80,38 +82,70 @@ def search(query, num=10, engines=None, lang=None, categories=None, timeout=30):
     url = _search_url() + "?" + urllib.parse.urlencode(params)
 
     try:
-        result = subprocess.run(
-            # No -s: capture stderr for diagnosis. -sS gives errors without progress.
-            ["curl", "-sS", "--max-time", str(timeout), url],
-            capture_output=True, text=True, timeout=timeout + 5,
-        )
-    except subprocess.TimeoutExpired as e:
+        def do_request():
+            resp = urllib.request.urlopen(url, timeout=timeout)
+            return resp.read().decode("utf-8")
+        raw = _run_with_timeout(do_request, timeout + 5)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")[:500] if e.fp else ""
+        raise RuntimeError(json.dumps({
+            "error_type": "http_error",
+            "http_status": e.code,
+            "url": url,
+            "stderr": body or "(empty)",
+            "hint": f"SearxNG returned HTTP {e.code}. Check SEARXNG_URL and server logs.",
+        }))
+    except socket.timeout:
         raise RuntimeError(json.dumps({
             "error_type": "timeout",
-            "message": f"curl wrapper timed out after {timeout + 5}s",
             "url": url,
+            "hint": "query too slow; try -e arxiv,github,bing to skip Chrome-rendered engines",
         }))
-
-    if result.returncode != 0:
-        err_type = _classify_curl_error(result.returncode, result.stderr)
+    except urllib.error.URLError as e:
+        reason = e.reason
+        if isinstance(reason, socket.timeout):
+            error_type, hint = "timeout", "query too slow; try -e arxiv,github,bing to skip Chrome-rendered engines"
+        elif isinstance(reason, ConnectionRefusedError):
+            error_type, hint = "backend_unreachable", f"is SearxNG running at {_search_url()}?"
+        elif isinstance(reason, (socket.gaierror, socket.herror)):
+            error_type, hint = "dns", "check SEARXNG_URL hostname resolution"
+        elif isinstance(reason, ssl.SSLError):
+            error_type, hint = "tls", f"TLS error connecting to {_search_url()}. Check certificates."
+        else:
+            error_type, hint = "network_error", ""
         raise RuntimeError(json.dumps({
-            "error_type": err_type,
-            "curl_exit": result.returncode,
-            "stderr": result.stderr.strip()[:500] or "(empty)",
-            "hint": {
-                "timeout": "query too slow; try -e arxiv,github,bing to skip Chrome-rendered engines",
-                "backend_unreachable": f"is SearxNG running at {_search_url()}?",
-                "dns": "check SEARXNG_URL hostname resolution",
-            }.get(err_type, ""),
+            "error_type": error_type,
+            "url": url,
+            "message": str(reason),
+            "hint": hint,
+        }))
+    except ssl.SSLError as e:
+        raise RuntimeError(json.dumps({
+            "error_type": "tls",
+            "url": url,
+            "message": str(e),
+            "hint": f"TLS error connecting to {_search_url()}. Check certificates.",
+        }))
+    except OSError as e:
+        if isinstance(e, socket.timeout):
+            raise RuntimeError(json.dumps({
+                "error_type": "timeout",
+                "url": url,
+                "hint": "query too slow; try -e arxiv,github,bing to skip Chrome-rendered engines",
+            }))
+        raise RuntimeError(json.dumps({
+            "error_type": "network_error",
+            "url": url,
+            "message": str(e),
         }))
 
     try:
-        data = json.loads(result.stdout)
+        data = json.loads(raw)
     except json.JSONDecodeError as e:
         raise RuntimeError(json.dumps({
             "error_type": "bad_response",
             "message": f"SearxNG returned non-JSON: {e}",
-            "first_200_bytes": result.stdout[:200],
+            "first_200_bytes": raw[:200],
         }))
 
     return {
@@ -175,9 +209,9 @@ def main():
         "Default: google."
     ))
     p.add_argument("--lang",       "-l", help="zh-CN, en, ja, ko")
-    p.add_argument("--categories", "-c", help="general,news,images,science")
+    p.add_argument("--categories", "-c", help="general,news,images,science,it,videos,social,files")
     p.add_argument("--timeout",    "-t", type=int, default=30,
-                                          help="curl timeout in seconds (default: 30)")
+                                          help="request timeout in seconds (default: 30)")
     p.add_argument("--json",       "-j", action="store_true")
     p.add_argument("--urls-only",  "-u", action="store_true")
     p.add_argument("--version",    "-V", action="version", version=f"ask-search {VERSION}")

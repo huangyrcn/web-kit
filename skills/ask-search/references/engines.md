@@ -53,7 +53,7 @@ ask-search "query" --categories news       # 只搜新闻
 | duckduckgo news | ddn |
 | google news | gon |
 | qwant news | qwn |
-| reuters | re |
+| reuters | reu |
 | wikinews | wn |
 | yahoo news | yhn |
 
@@ -107,10 +107,10 @@ ask-search "query" --categories news       # 只搜新闻
 
 ## 社交媒体 (social media)
 
-| 引擎 | shortcut |
-|---|---|
-| reddit | re |
-| hackernews | hn |
+| 引擎 | shortcut | 说明 |
+|---|---|---|
+| reddit | re | Reddit 帖子 |
+| hackernews | hn | Hacker News |
 | lemmy posts | - | Lemmy 帖子 |
 | lemmy comments | - | Lemmy 评论 |
 | mastodon hashtags | - | Mastodon 话题 |

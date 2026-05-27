@@ -38,7 +38,7 @@ crwlr crawl -o md "https://arxiv.org/abs/xxxx2" -O /tmp/paper2.md
 
 要点：
 - `--categories science` 限定学术引擎，避免噪音
-- `--engines arxiv,semantic scholar api` 可进一步精确到特定引擎
+- `--engines arxiv,semantic_scholar` 可进一步精确到特定引擎
 - arxiv 的 `/abs/` 页面是摘要，`/html/` 页面有全文 HTML
 
 ## 3. 新闻追踪
@@ -104,18 +104,18 @@ done
 当主 agent 需要分派搜索+阅读任务给 sub-agent 时：
 
 ```
-请使用 web-kit skill 完成以下调研任务：
+请完成以下调研任务：
 
 目标：[描述要调研什么]
 
 步骤建议：
-1. 用 ask-search 搜索相关信息
+1. 用 ask-search skill 搜索相关信息
 2. 从结果中选取最相关的 3-5 个 URL
-3. 用 crwlr 读取这些页面的全文
+3. 用 crwlr skill 读取这些页面的全文
 4. 综合多源信息，给出分析结论
 
 注意：
-- 使用 --categories science 限定学术搜索
+- 使用 -c science 限定学术搜索
 - 多源交叉验证，不要只依赖一个来源
 - 关键信息标注来源 URL
 ```
