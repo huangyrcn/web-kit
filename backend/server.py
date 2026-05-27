@@ -4,7 +4,7 @@
 Reliability features added on top of the original:
   - _ensure_browser(): per-request CDP reconnect when the underlying browser dies
   - asyncio.Semaphore(3): bounded concurrency (matches Chrome page-pool size)
-  - in-process failure cache: short-circuits queries that just failed (60s)
+  - in-process failure cache: short-circuits queries that just failed (15s)
 
 Endpoints:
   /google?q=xxx   → Google search
@@ -50,7 +50,7 @@ async def _warmup_browser(browser):
     ERR_CONNECTION_RESET because the browser isn't fully initialised yet."""
     page = None
     try:
-        ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
+        ctx = browser.contexts[0] if browser.contexts else await browser.new_context(locale="en-US")
         page = await ctx.new_page()
         await page.goto("about:blank", timeout=5000)
         logger.info("Browser warmup OK")
@@ -316,6 +316,8 @@ async def search_google(q: str = Query(..., min_length=1), limit: int = Query(10
             except Exception as e:
                 if attempt == 0 and any(t in str(e) for t in _transient):
                     logger.warning("Google: transient error on attempt 1, retrying: %s", e)
+                    await page.close()
+                    page = await ctx.new_page()
                     await asyncio.sleep(2)
                     continue
                 raise
@@ -449,6 +451,8 @@ async def search_ddg(q: str = Query(..., min_length=1), limit: int = Query(10, g
             except Exception as e:
                 if attempt == 0 and any(t in str(e) for t in _transient):
                     logger.warning("DDG: transient error on attempt 1, retrying: %s", e)
+                    await page.close()
+                    page = await ctx.new_page()
                     await asyncio.sleep(2)
                     continue
                 raise
@@ -508,6 +512,10 @@ async def open_url(url: str = Query(...)):
         try:
             await _manual_page.goto(url, timeout=30000)
         except Exception as e:
+            try:
+                await _manual_page.close()
+            except Exception:
+                pass
             _manual_page = None
             return JSONResponse({"error": f"goto failed: {e}", "url": url}, status_code=502)
 

@@ -140,7 +140,10 @@ def download(url, output_path=None, cdp_url=None):
         # 100 KB PDF, fragile for a 100 MB one.
         # Write to a temp file first, then rename on success.
         # Avoids leaving a partial file on disk if the download fails mid-stream.
-        tmp_path = output_path + ".part"
+        import tempfile
+        tmp_dir = os.path.dirname(os.path.abspath(output_path))
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=tmp_dir, suffix=".part")
+        os.close(tmp_fd)
         msg_id = 3
         bytes_written = 0
         try:
@@ -172,7 +175,7 @@ def download(url, output_path=None, cdp_url=None):
                     # Progress
                     if content_length != "unknown":
                         total = int(content_length)
-                        percent = bytes_written * 100 // total
+                        percent = bytes_written * 100 // total if total > 0 else 100
                         print(f"\rDownloading: {percent}% ({bytes_written}/{total} bytes)",
                               end="", flush=True)
 

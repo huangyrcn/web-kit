@@ -72,7 +72,7 @@ def search(query, num=10, engines=None, lang=None, categories=None, timeout=30):
     params = {"q": query, "format": "json", "pageno": 1}
     if engines:
         params["engines"] = engines
-    else:
+    elif not categories:
         params["engines"] = "google"
     if lang:       params["language"] = lang
     if categories: params["categories"] = categories
@@ -141,7 +141,7 @@ def fmt_results(results, urls_only=False, unresponsive=None):
     return out
 
 def searxng_search(query, num=15):
-    """MCP/legacy interface — returns JSON string. Backwards-compatible shape."""
+    """MCP/legacy interface — returns JSON string."""
     try:
         bundle = search(query, num)
         return json.dumps({
@@ -154,9 +154,12 @@ def searxng_search(query, num=15):
             err = json.loads(str(e))
         except json.JSONDecodeError:
             err = {"error_type": "internal", "message": str(e)}
-        return json.dumps({"query": query, "results": [], **err}, ensure_ascii=False)
+        err["query"] = query
+        err["results"] = []
+        err.setdefault("error", err.get("message", str(e)))
+        return json.dumps(err, ensure_ascii=False)
     except Exception as e:
-        return json.dumps({"query": query, "results": [], "error_type": "internal", "message": str(e)}, ensure_ascii=False)
+        return json.dumps({"query": query, "results": [], "error_type": "internal", "error": str(e), "message": str(e)}, ensure_ascii=False)
 
 def main():
     p = argparse.ArgumentParser(description="SearxNG search (cross-environment)")
