@@ -7,11 +7,13 @@ Reliability features added on top of the original:
   - in-process failure cache: short-circuits queries that just failed (15s)
 
 Endpoints:
-  /google?q=xxx   → Google search
-  /ddg?q=xxx      → DuckDuckGo search
-  /arxiv?q=xxx    → arXiv search (via Chrome)
-  /open?url=xxx   → Open URL for manual interaction via VNC
-  /health         → health check
+  /google?q=xxx         → Google search
+  /ddg?q=xxx            → DuckDuckGo search
+  /bing?q=xxx           → Bing search (via Chrome)
+  /arxiv?q=xxx          → arXiv search (via Chrome)
+  /google_scholar?q=xxx → Google Scholar search (via Chrome CDP)
+  /open?url=xxx         → Open URL for manual interaction via VNC
+  /health               → health check
 """
 
 import asyncio
@@ -474,6 +476,94 @@ async def search_ddg(q: str = Query(..., min_length=1), limit: int = Query(10, g
         _page_sem.release()
 
 
+
+# ─── Bing (via Chrome) ───────────────────────────────────────────────────────
+
+_BING_EXTRACT_JS = r"""
+() => {
+  const out = [];
+  const items = document.querySelectorAll('li.b_algo');
+  for (const item of items) {
+    const h2 = item.querySelector('h2 a');
+    if (!h2) continue;
+    const title = h2.innerText.trim();
+    let url = h2.href || '';
+    // Decode Bing redirect URL: /ck/a?...&u=a1<base64>
+    if (url.includes('bing.com/ck/a')) {
+      try {
+        const u = new URL(url).searchParams.get('u');
+        if (u && u.startsWith('a1')) {
+          let b64 = u.slice(2);
+          while (b64.length % 4) b64 += '=';
+          url = atob(b64);
+        }
+      } catch {}
+    }
+    const snippet = item.querySelector('.b_caption p');
+    const content = snippet ? snippet.innerText.trim() : '';
+    out.push({ title, url, content });
+  }
+  return out;
+}
+"""
+
+
+@app.get("/bing")
+async def search_bing(q: str = Query(..., min_length=1), limit: int = Query(10, ge=1, le=30)):
+    quarantine = _check_failure("bing")
+    if quarantine is not None:
+        return JSONResponse(
+            {"error": f"bing quarantined for {int(quarantine)}s after recent failure", "results": []},
+            status_code=503,
+        )
+
+    try:
+        browser = await _ensure_browser()
+    except Exception as e:
+        return JSONResponse({"error": f"chrome unreachable: {e}", "results": []}, status_code=503)
+
+    try:
+        await asyncio.wait_for(_page_sem.acquire(), timeout=30)
+    except asyncio.TimeoutError:
+        return JSONResponse({"error": "queue timeout", "results": []}, status_code=503)
+
+    page = None
+    try:
+        ctx = await _get_context(browser)
+        page = await ctx.new_page()
+        url = f"https://www.bing.com/search?q={quote_plus(q)}"
+
+        _transient = ("ERR_CONNECTION_CLOSED", "ERR_CONNECTION_RESET",
+                      "ERR_CONNECTION_REFUSED", "ERR_NAME_NOT_RESOLVED")
+        for attempt in range(2):
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                break
+            except Exception as e:
+                if attempt == 0 and any(t in str(e) for t in _transient):
+                    logger.warning("Bing: transient error on attempt 1, retrying: %s", e)
+                    await page.close()
+                    page = await ctx.new_page()
+                    await asyncio.sleep(2)
+                    continue
+                raise
+
+        raw = await page.evaluate(_BING_EXTRACT_JS)
+        results = (raw or [])[:limit]
+        return {"query": q, "engine": "bing", "results": results}
+    except Exception as e:
+        logger.exception("Bing search failed")
+        _record_failure("bing")
+        return JSONResponse({"error": str(e), "results": []}, status_code=500)
+    finally:
+        if page is not None:
+            try:
+                await page.close()
+            except Exception:
+                pass
+        _page_sem.release()
+
+
 # ─── arXiv (via Chrome) ──────────────────────────────────────────────────────
 
 _ARXIV_RESULT_RE = re.compile(
@@ -614,6 +704,167 @@ async def search_arxiv(q: str = Query(..., min_length=1), limit: int = Query(10,
     except Exception as e:
         logger.exception("arXiv search failed")
         _record_failure("arxiv")
+        return JSONResponse({"error": str(e), "results": []}, status_code=500)
+    finally:
+        if page is not None:
+            try:
+                await page.close()
+            except Exception:
+                pass
+        _page_sem.release()
+
+
+# ─── Google Scholar (via Chrome CDP) ─────────────────────────────────────────
+
+_SCHOLAR_EXTRACT_JS = r"""
+() => {
+  const out = [];
+  const items = document.querySelectorAll('.gs_r.gs_or.gs_scl');
+  for (const item of items) {
+    const titleEl = item.querySelector('.gs_rt a');
+    if (!titleEl) continue;
+    let title = (titleEl.innerText || '').trim();
+    const href = titleEl.href || '';
+    if (!title) continue;
+    // Strip [PDF]/[HTML]/[CITATION] prefix tags
+    title = title.replace(/^\[(?:PDF|HTML|CITATION|BOOK)\]\s*/i, '');
+
+    const authorsEl = item.querySelector('.gs_a');
+    const authorsRaw = authorsEl ? authorsEl.innerText.trim() : '';
+    // "Author1, Author2 - Venue, Year - Publisher" → take part before first " - "
+    const authors = authorsRaw.split(' - ')[0].trim();
+
+    // Year: first 4-digit number in 19xx/20xx range from the authors line
+    const yearMatch = authorsRaw.match(/\b((?:19|20)\d{2})\b/);
+    const year = yearMatch ? yearMatch[1] : '';
+
+    const snippetEl = item.querySelector('.gs_rs');
+    const snippet = snippetEl ? snippetEl.innerText.trim().replace(/\s+/g, ' ') : '';
+
+    // PDF link from right-side panel
+    const pdfEl = item.querySelector('.gs_or_ggsm a');
+    const pdfUrl = pdfEl ? pdfEl.href : '';
+
+    // Citation count from footer links
+    let citationCount = '';
+    const flLinks = item.querySelectorAll('.gs_fl a');
+    for (const a of flLinks) {
+      const m = a.innerText.match(/Cited by (\d+)/);
+      if (m) { citationCount = m[1]; break; }
+    }
+
+    out.push({ title, url: href, authors, year, snippet, pdfUrl, citationCount });
+  }
+  return out;
+}
+"""
+
+
+def _format_scholar_content(item: dict) -> str:
+    """Build a content string that embeds academic metadata for SearxNG."""
+    parts = []
+    meta = []
+    if item.get("authors"):
+        meta.append(item["authors"])
+    if item.get("citationCount"):
+        meta.append(f"Cited by {item['citationCount']}")
+    if item.get("pdfUrl"):
+        meta.append(f"PDF: {item['pdfUrl']}")
+    if meta:
+        parts.append(" | ".join(meta))
+    if item.get("snippet"):
+        parts.append(item["snippet"])
+    return ". ".join(parts)
+
+
+async def _parse_scholar(page, limit: int) -> list[dict]:
+    results: list[dict] = []
+    try:
+        await page.wait_for_selector(".gs_r.gs_or.gs_scl", timeout=10000)
+    except Exception:
+        logger.warning("Scholar: timeout waiting for results")
+        return results
+
+    try:
+        raw = await page.evaluate(_SCHOLAR_EXTRACT_JS)
+    except Exception as e:
+        logger.warning("Scholar: JS extraction failed: %s", e)
+        raw = []
+
+    for item in raw or []:
+        if len(results) >= limit:
+            break
+        title = (item.get("title") or "").strip()
+        url = (item.get("url") or "").strip()
+        if not title or not url:
+            continue
+        results.append({
+            "title": title,
+            "url": url,
+            "content": _format_scholar_content(item),
+            "authors": (item.get("authors") or "").strip(),
+            "year": (item.get("year") or "").strip(),
+            "citation_count": (item.get("citationCount") or "").strip(),
+            "pdf_url": (item.get("pdfUrl") or "").strip(),
+        })
+
+    return results
+
+
+@app.get("/google_scholar")
+async def search_google_scholar(q: str = Query(..., min_length=1), limit: int = Query(10, ge=1, le=30)):
+    quarantine = _check_failure("google_scholar")
+    if quarantine is not None:
+        return JSONResponse(
+            {"error": f"google_scholar quarantined for {int(quarantine)}s after recent failure", "results": []},
+            status_code=503,
+        )
+
+    try:
+        browser = await _ensure_browser()
+    except Exception as e:
+        return JSONResponse({"error": f"chrome unreachable: {e}", "results": []}, status_code=503)
+
+    try:
+        await asyncio.wait_for(_page_sem.acquire(), timeout=30)
+    except asyncio.TimeoutError:
+        return JSONResponse({"error": "queue timeout", "results": []}, status_code=503)
+
+    page = None
+    try:
+        ctx = await _get_context(browser)
+        page = await ctx.new_page()
+        url = f"https://scholar.google.com/scholar?q={quote_plus(q)}&hl=en"
+
+        _transient = ("ERR_CONNECTION_CLOSED", "ERR_CONNECTION_RESET",
+                      "ERR_CONNECTION_REFUSED", "ERR_NAME_NOT_RESOLVED")
+        for attempt in range(2):
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                break
+            except Exception as e:
+                if attempt == 0 and any(t in str(e) for t in _transient):
+                    logger.warning("Scholar: transient error on attempt 1, retrying: %s", e)
+                    await page.close()
+                    page = await ctx.new_page()
+                    await asyncio.sleep(2)
+                    continue
+                raise
+
+        page_content = await page.content()
+        if "unusual traffic" in page_content.lower() or "robot" in page_content.lower():
+            logger.error("Google Scholar CAPTCHA — log in via VNC (port 6080)")
+            _record_failure("google_scholar")
+            return JSONResponse(
+                {"error": "Google Scholar CAPTCHA. Log in via VNC to refresh session.", "results": []},
+                status_code=429,
+            )
+
+        results = await _parse_scholar(page, limit)
+        return {"query": q, "engine": "google_scholar", "results": results}
+    except Exception as e:
+        logger.exception("Google Scholar search failed")
+        _record_failure("google_scholar")
         return JSONResponse({"error": str(e), "results": []}, status_code=500)
     finally:
         if page is not None:
