@@ -9,11 +9,12 @@ ask-search v1.1.0 — Cross-environment SearxNG search skill
 Works in: OpenClaw (CLI) | Claude Code (CLI) | Antigravity (MCP)
 
 Usage:
-  ask-search "query"                    # top 10 results (google)
+  ask-search "query"                    # top 10 results (default: google)
   ask-search "query" --num 5            # limit results
   ask-search "AI news" --categories news
   ask-search "query" --lang zh-CN
   ask-search "query" -e arxiv,openalex  # specific engines
+  ask-search "query" -e openalex,github # cheap engines (no Chrome)
   ask-search "query" --urls-only        # URL list only (pipe to web_fetch)
   ask-search "query" --json             # raw JSON output
 
@@ -108,7 +109,7 @@ def search(query, num=10, engines=None, lang=None, categories=None, timeout=30):
         raise RuntimeError(json.dumps({
             "error_type": "timeout",
             "url": url,
-            "hint": "query too slow; try -e arxiv,github,bing to skip Chrome-rendered engines",
+            "hint": "query too slow; try -e openalex,github,semantic_scholar to skip Chrome-rendered engines",
         }))
     except urllib.error.URLError as e:
         reason = e.reason
@@ -140,7 +141,7 @@ def search(query, num=10, engines=None, lang=None, categories=None, timeout=30):
             raise RuntimeError(json.dumps({
                 "error_type": "timeout",
                 "url": url,
-                "hint": "query too slow; try -e arxiv,github,bing to skip Chrome-rendered engines",
+                "hint": "query too slow; try -e openalex,github,semantic_scholar to skip Chrome-rendered engines",
             }))
         raise RuntimeError(json.dumps({
             "error_type": "network_error",
@@ -211,10 +212,10 @@ def main():
     p.add_argument("--engines",    "-e", help=(
         "Comma-separated engine list. Common picks: "
         "academic (arxiv,openalex,semantic_scholar,google_scholar,pubmed); "
-        "code (github,github_code,gitlab,stackexchange,pypi,npm); "
-        "social (reddit,hackernews); "
-        "general-cheap (bing,brave) — these don't go through Chrome; "
-        "general-expensive (google,duckduckgo) — Chrome-rendered, slow, rate-limit-prone. "
+        "code (github,github_code,gitlab,pypi,npm); "
+        "social (hackernews,reddit); "
+        "cheap — no Chrome needed (openalex,github,semantic_scholar,pubmed,dblp,hackernews,npm); "
+        "all general engines (google,bing,duckduckgo,arxiv,google_scholar) go through Chrome. "
         "Default: google."
     ))
     p.add_argument("--lang",       "-l", help="zh-CN, en, ja, ko")
@@ -257,7 +258,7 @@ def main():
             out["unresponsive_engines"] = unresponsive
             out["hint"] = (
                 "Some engines are quarantined. Try -e with cheap engines "
-                "(arxiv,openalex,github,bing,brave) to bypass them."
+                "(openalex,github,semantic_scholar,pubmed,dblp) to bypass them."
             )
         print(json.dumps(out, ensure_ascii=False)); sys.exit(1)
 

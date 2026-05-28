@@ -1,125 +1,71 @@
 # SearxNG 引擎分类表
 
-当前 SearxNG 实例启用的引擎，按用途分类。
+当前 SearxNG 实例启用的引擎，按实现方式分类。
 
-搜索时用 `--engines` 指定引擎，用 `--categories` 指定分类。
+## Chrome 依赖 (经 search-proxy)
 
-示例：
-```bash
-ask-search "query" --categories science    # 只搜学术引擎
-ask-search "query" --engines google,bing   # 只用指定引擎
-ask-search "query" --categories news       # 只搜新闻
-```
+这些引擎需要 Chrome 渲染，延迟较高。
 
-## 通用搜索 (general/web)
+| 引擎 | shortcut | search-proxy 端点 | 说明 |
+|------|----------|-------------------|------|
+| google | go | `/google` | Google 通用搜索 |
+| bing | bi | `/bing` | Bing 通用搜索 |
+| duckduckgo | dd | `/ddg` | DuckDuckGo |
+| arxiv | arx | `/arxiv` | arXiv 预印本 |
+| google scholar | gos | `/google_scholar` | Google Scholar |
 
-| 引擎 | shortcut | 说明 |
-|---|---|---|
-| bing | bi | 微软 Bing |
-| brave | br | Brave Search |
-| duckduckgo | ddg | DuckDuckGo |
-| google | go | Google |
-| mojeek | mj | 英国独立搜索引擎，无追踪 |
-| qwant | qw | 法国搜索引擎，注重隐私 |
-| startpage | sp | Google 结果代理，匿名 |
-| yahoo | yh | Yahoo 搜索 |
-| wikipedia | wp | 维基百科 |
-| wikidata | wd | 维基数据 |
-| stackexchange | st | Stack Exchange 全站 |
+## API 直连 (无 Chrome 依赖)
 
-## 学术 (science / scientific publications)
+这些引擎直接调用外部 API，延迟低，推荐用于快速搜索。
 
 | 引擎 | shortcut | 说明 |
-|---|---|---|
-| arxiv | ax | arXiv 预印本 |
-| base | - | Bielefeld 学术搜索引擎 |
-| core | - | 开放获取论文 |
-| crossref | - | DOI 元数据 |
-| dblp | - | 计算机科学文献 |
-| doaj | - | 开放获取期刊 |
-| google scholar | gsc | Google Scholar |
-| openairedatasets | - | OpenAIRE 数据集 |
-| openairepublications | - | OpenAIRE 论文 |
+|------|----------|------|
+| semantic scholar | se | Semantic Scholar (带 API key) |
 | openalex | - | OpenAlex 学术图谱 |
+| dblp | - | 计算机科学文献 |
 | pubmed | pm | PubMed 生物医学 |
-| semantic scholar | se | Semantic Scholar（API 版本） |
-
-## 新闻 (news)
-
-| 引擎 | shortcut |
-|---|---|
-| bing news | bin |
-| brave.news | brn |
-| duckduckgo news | ddn |
-| google news | gon |
-| qwant news | qwn |
-| reuters | reu |
-| wikinews | wn |
-| yahoo news | yhn |
-
-## IT / 代码 (it)
-
-| 引擎 | shortcut | 说明 |
-|---|---|---|
 | github | gh | GitHub 仓库 |
+| github code | ghc | GitHub 代码搜索 (带 token) |
 | gitlab | gl | GitLab 仓库 |
-| huggingface | hf | HuggingFace 模型 |
-| stackoverflow | st | Stack Overflow |
-| askubuntu | - | Ask Ubuntu |
-| superuser | - | Super User |
-| mdn | - | MDN Web Docs |
-| microsoft learn | - | 微软文档 |
-| npm | - | npm 包 |
-| pypi | - | PyPI 包 |
-| crates.io | - | Rust crates |
-| docker hub | - | Docker 镜像 |
-| pkg.go.dev | - | Go 包 |
-| lib.rs | - | Rust 包 |
-
-## 视频 (videos)
-
-| 引擎 | shortcut |
-|---|---|
-| youtube | yt |
-| dailymotion | dm |
-| vimeo | vm |
-| bing videos | biv |
-| brave.videos | brv |
-| duckduckgo videos | ddv |
-| google videos | gov |
-| qwant videos | qwv |
-
-## 图片 (images)
-
-| 引擎 | shortcut |
-|---|---|
-| bing images | bii |
-| brave.images | bri |
-| duckduckgo images | ddi |
-| google images | goi |
-| qwant images | qwi |
-| startpage images | spi |
-| deviantart | da |
-| flickr | fl |
-| unsplash | us |
-| pexels | px |
-| pinterest | pi |
-
-## 社交媒体 (social media)
-
-| 引擎 | shortcut | 说明 |
-|---|---|---|
-| reddit | re | Reddit 帖子 |
 | hackernews | hn | Hacker News |
-| lemmy posts | - | Lemmy 帖子 |
-| lemmy comments | - | Lemmy 评论 |
-| mastodon hashtags | - | Mastodon 话题 |
-| tootfinder | - | Mastodon 用户搜索 |
+| huggingface | hf | HuggingFace 模型/数据集 |
+| npm | - | npm 包 |
+| crates.io | - | Rust crates |
+| lib.rs | - | Rust 包 (lib.rs) |
+| pkg.go.dev | - | Go 包 |
+| sourcehut | - | SourceHut |
+| microsoft learn | - | 微软文档 |
+| nvd | - | NVD 漏洞数据库 |
+| pypi | - | PyPI 包 |
+| wikidata | wd | Wikidata |
+| reddit | re | Reddit (当前 access denied) |
 
-## 文件/书籍 (files/books)
+## 页面抓取 (原生，无 Chrome)
 
 | 引擎 | shortcut | 说明 |
-|---|---|---|
+|------|----------|------|
 | annas archive | aa | Anna's Archive |
-| zlibrary | zl | Z-Library |
-| openlibrary | ol | Open Library |
+| zlibrary | zlib | Z-Library |
+
+## 已禁用
+
+base, crossref, core, doaj, pdbe, openairedatasets, openairepublications,
+brave, startpage, qwant, mojeek, yahoo, yandex, wikipedia, openlibrary, stackexchange
+
+---
+
+使用示例：
+
+```bash
+# 默认 (Google)
+ask-search "query"
+
+# 快速学术搜索 (无 Chrome)
+ask-search "query" -e openalex,semantic_scholar,dblp
+
+# 多引擎通用搜索 (Chrome, 较慢)
+ask-search "query" -e google,bing,duckduckgo
+
+# 指定分类
+ask-search "query" -c science
+```
