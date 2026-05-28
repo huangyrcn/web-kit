@@ -13,11 +13,13 @@ allowed-tools: Bash
 
 # cdp-download — CDP 认证下载
 
-通过 Chrome DevTools Protocol 下载文件。三种策略自动降级：
+通过 Chrome DevTools Protocol 下载文件。三种策略按优先级自动降级：
 
-1. **流式下载**（`Network.loadNetworkResource` + `IO.read`）— 快速，适合大文件
-2. **Fetch 拦截**（`Fetch.requestPaused` + `Page.navigate`）— 绕过 CSP 限制
-3. **交互模式**（`--interactive`）— 通过 noVNC 手动解决 reCAPTCHA 后重试
+1. **流式下载**（`Network.loadNetworkResource` + `IO.read`）— 优先使用，流式写盘适合大文件
+2. **Fetch 拦截**（`Fetch.requestPaused` + `Page.navigate`）— 策略 1 失败时自动降级（CSP 拦截、HTTP 4xx/5xx）
+3. **交互模式**（`--interactive`）— 检测到 reCAPTCHA 时提示用户通过 noVNC 手动验证
+
+流式优先是因为它不占用内存；Fetch 策略会把整个响应载入内存，仅作为绕过 CSP 的备选。
 
 支持浏览器认证/cookie（`includeCredentials: true`），流式读取适合大文件。
 

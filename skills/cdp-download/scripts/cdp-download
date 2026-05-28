@@ -6,9 +6,9 @@
 """
 Download files via Chrome DevTools Protocol (CDP).
 
-Three strategies (tried in order):
-  1. Network.loadNetworkResource + IO.read (fast, streaming)
-  2. Fetch.requestPaused + Page.navigate (bypasses CSP)
+Three strategies (tried in order of priority):
+  1. Network.loadNetworkResource + IO.read (streaming, low memory — preferred)
+  2. Fetch.requestPaused + Page.navigate (bypasses CSP, buffers in memory — fallback)
   3. Interactive: prompts user to solve reCAPTCHA via noVNC, then retries (opt-in)
 
 Usage:
