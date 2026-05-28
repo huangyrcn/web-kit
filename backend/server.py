@@ -9,7 +9,7 @@ Reliability features added on top of the original:
 Endpoints:
   /google?q=xxx   → Google search
   /ddg?q=xxx      → DuckDuckGo search
-  /arxiv?q=xxx    → arXiv search (direct HTTP, no Chrome)
+  /arxiv?q=xxx    → arXiv search (via Chrome)
   /open?url=xxx   → Open URL for manual interaction via VNC
   /health         → health check
 """
@@ -474,7 +474,7 @@ async def search_ddg(q: str = Query(..., min_length=1), limit: int = Query(10, g
         _page_sem.release()
 
 
-# ─── arXiv (via Chrome, same pattern as Google/DDG) ───────────────────────────
+# ─── arXiv (via Chrome) ──────────────────────────────────────────────────────
 
 _ARXIV_RESULT_RE = re.compile(
     r'<li class="arxiv-result">(.*?)</li>',
