@@ -109,12 +109,12 @@ def search(query, num=10, engines=None, lang=None, categories=None, timeout=30):
         raise RuntimeError(json.dumps({
             "error_type": "timeout",
             "url": url,
-            "hint": "query too slow; try -e openalex,github,semantic_scholar",
+            "hint": "query too slow",
         }))
     except urllib.error.URLError as e:
         reason = e.reason
         if isinstance(reason, socket.timeout):
-            error_type, hint = "timeout", "query too slow; try -e arxiv,github,bing to skip Chrome-rendered engines"
+            error_type, hint = "timeout", "query too slow"
         elif isinstance(reason, ConnectionRefusedError):
             error_type, hint = "backend_unreachable", f"is SearxNG running at {_search_url()}?"
         elif isinstance(reason, (socket.gaierror, socket.herror)):
@@ -141,7 +141,7 @@ def search(query, num=10, engines=None, lang=None, categories=None, timeout=30):
             raise RuntimeError(json.dumps({
                 "error_type": "timeout",
                 "url": url,
-                "hint": "query too slow; try -e openalex,github,semantic_scholar",
+                "hint": "query too slow",
             }))
         raise RuntimeError(json.dumps({
             "error_type": "network_error",
@@ -255,9 +255,7 @@ def main():
         out = {"error_type": "no_results", "query": args.query}
         if unresponsive:
             out["unresponsive_engines"] = unresponsive
-            out["hint"] = (
-                "Some engines are quarantined. Try -e openalex,github,semantic_scholar,pubmed,dblp"
-            )
+            out["hint"] = "some engines are quarantined"
         print(json.dumps(out, ensure_ascii=False)); sys.exit(1)
 
     if getattr(args, "json"):

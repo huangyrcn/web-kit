@@ -1,70 +1,101 @@
 ---
 name: ask-search
 description: >
-  通用多引擎搜索工具，基于 SearxNG 聚合 20+ 搜索引擎。
-  支持通用搜索（Google、Bing）、学术搜索（Google Scholar、Semantic Scholar、OpenAlex）、
-  新闻、IT/代码（GitHub、StackOverflow）、社交（Reddit、HackerNews）等。
-  当需要搜索信息、查新闻、做学术调研、找代码/包、查文档时使用此 skill。
-  中文触发词："搜索"、"查一下"、"最近新闻"、"帮我调研"、"文献搜索"、"找一下"、"搜一下"。
-  英文触发词："search for", "look up", "find", "look for", "literature search",
-  "find papers about", "search the web", "what's the latest on"。
-argument-hint: 'ask-search "query" [-n 5] [-e engine] [-c category] [-l lang] [-u]'
+  Multi-engine web search via SearxNG (20+ engines: Google, Bing, arXiv, Scholar, GitHub, npm, Reddit...).
+  Returns structured results with title, URL, snippet, and source engine metadata.
+  Use for any web search: general queries, academic papers, code/library lookup, news, discussions.
+  Do NOT use for: local file search (use grep), repo search (use gh CLI), docs search (use lark-doc).
+argument-hint: 'ask-search "query" [-n 5] [-e engine] [-j] [-c category]'
 allowed-tools: Bash
 ---
 
-# ask-search — 通用多引擎搜索
+# ask-search
 
-基于 SearxNG，聚合 20+ 搜索引擎。按场景选引擎。
+Multi-engine web search CLI. Based on SearxNG, aggregated 20+ search engines.
 
-## 调用方式
-
-```bash
-uv run --script ${SKILL_DIR}/scripts/ask-search "query"
-```
-
-## 速查
+## Quick start
 
 ```bash
-ask-search "query"                              # 默认 Google
-ask-search "query" -n 5                         # 限制数量
-ask-search "query" -l zh-CN                     # 中文
-ask-search "query" -u                           # 只返回 URL
+ask-search "query"                   # default: google, top 10
+ask-search "query" -j                # JSON output (recommended for agents)
+ask-search "query" -e arxiv,openalex # specific engines
+ask-search "query" -n 5              # limit results
+ask-search "query" -l zh-CN          # Chinese results
+ask-search "query" -c news           # news category
 ```
 
-## 按场景选引擎
+## Engine selection
 
-```bash
-# 通用搜索（默认 Google）
-ask-search "query"
+Default: google. Only use `-e` for specific scenarios:
 
-# 学术论文
-ask-search "transformer attention" -e google_scholar,semantic_scholar,openalex
+| Task | Command |
+|------|---------|
+| General search | `ask-search "query"` (no `-e` needed) |
+| Academic papers | `ask-search "query" -e arxiv,google_scholar,semantic_scholar,openalex` |
+| Code / packages | `ask-search "query" -e github,npm,pypi` |
+| News | `ask-search "query" -c news` |
+| Discussions | `ask-search "query" -e reddit,hackernews` |
 
-# 限定站点
-ask-search "RAG site:arxiv.org"
-ask-search "react hooks site:github.com"
+Full engine list see `references/engines.md`.
 
-# 限定时间（Google 语法）
-ask-search "LLM agent after:2025"
+## Output format (JSON)
 
-# 新闻
-ask-search "AI regulation" -c news
+Use `-j` for structured output. Schema:
 
-# IT / 代码
-ask-search "fastapi middleware" -e github,stackoverflow
-
-# 社区讨论
-ask-search "k8s ingress" -e reddit,hackernews
+```json
+{
+  "query": "search terms",
+  "results": [
+    {
+      "title": "Page title",
+      "url": "https://...",
+      "content": "Snippet text",
+      "engines": ["google", "bing"],
+      "score": 3.5
+    }
+  ],
+  "unresponsive_engines": [["engine_name", "reason"]]
+}
 ```
 
-## 可用引擎
+- `results` — sorted by relevance, each item has `title`, `url`, `content`, `engines` (which engines returned it)
+- `unresponsive_engines` — engines that failed or were quarantined
+- `score` — higher = more engines agreed on this result
 
-| 场景 | 推荐引擎 | 备注 |
-|------|---------|------|
-| 通用 | google, bing | 默认 google |
-| 学术 | google_scholar, semantic_scholar, openalex | 避免 `-e arxiv`（有限流） |
-| 新闻 | -c news（自动选新闻引擎） | |
-| IT | github, stackoverflow, npm, pypi | |
-| 社交 | reddit, hackernews | |
+## Default output (human-readable)
 
-完整引擎列表见 `references/engines.md`。
+Without `-j`, prints formatted text:
+
+```
+[1] Title
+    https://...
+    Snippet text (max 200 chars)
+    [google]
+```
+
+## Error handling
+
+All errors output as JSON to stdout (exit code 1):
+
+```json
+{"error_type": "timeout", "query": "...", "hint": "..."}
+```
+
+| `error_type` | Meaning | Recovery |
+|--------------|---------|----------|
+| `timeout` | Request too slow | Retry with longer timeout `-t 60`, or switch engines |
+| `no_results` | No results from any engine | Retry with different engines |
+| `http_error` | SearxNG returned error | Check `http_status`, usually transient |
+| `backend_unreachable` | SearxNG down | Check `SEARXNG_URL` env var |
+
+### Recovery strategy
+
+When `no_results` or `timeout`:
+
+1. If `unresponsive_engines` is non-empty, some engines failed — retry with different `-e` set
+2. For general queries: try default (google) with longer timeout `-t 60`
+3. Do not retry with the same engine set that just failed
+
+## Environment
+
+`SEARXNG_URL` — SearxNG endpoint (default: `http://localhost:8082`)
