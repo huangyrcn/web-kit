@@ -493,7 +493,7 @@ _BING_EXTRACT_JS = r"""
       try {
         const u = new URL(url).searchParams.get('u');
         if (u && u.startsWith('a1')) {
-          let b64 = u.slice(2);
+          let b64 = u.slice(2).replace(/-/g, '+').replace(/_/g, '/');
           while (b64.length % 4) b64 += '=';
           url = atob(b64);
         }
