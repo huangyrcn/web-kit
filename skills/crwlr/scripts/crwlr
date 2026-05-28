@@ -4,24 +4,21 @@
 # dependencies = ["crawl4ai>=0.7.0"]
 # ///
 """
-crwlr — Web page crawler using crawl4ai with remote Chrome via CDP.
+crwlr — Fallback web fetcher using a real Chrome browser via CDP.
 
-Wraps crawl4ai's AsyncWebCrawler, connecting to a remote Chrome instance
-for JS-rendered page extraction. Supports markdown output, Q&A, structured
-extraction, and deep crawling.
+Use when curl/wget/WebFetch are blocked by anti-scraping, return incomplete
+content, or can't render JS-heavy pages. Connects to a remote Chrome instance
+and converts pages to clean markdown.
 
 Usage:
-  crwlr crawl -o md "https://example.com"              # Page to markdown
-  crwlr crawl -O out.md "https://example.com"          # Save to file
-  crwlr crawl -q "what is this about?" "https://..."   # Q&A (requires LLM)
-  crwlr crawl -j "extract data" -o json "https://..."  # Structured extraction
-  crwlr crawl --deep-crawl bfs --max-pages 20 "https://..."  # Deep crawl
-  crwlr crawl -bc "https://example.com"                # Bypass cache
-  crwlr --raw crawl -o md "https://..."                # Use local browser
+  crwlr crawl -O out.md "https://example.com"          # Fetch and save (recommended)
+  crwlr crawl -o md "https://example.com"               # Output to stdout
+  crwlr crawl --deep-crawl bfs --max-depth 20 -O out.md "https://..."  # Deep crawl
+  crwlr crawl -bc -O out.md "https://example.com"       # Bypass cache
+  crwlr --raw crawl -o md "https://..."                 # Use local browser
 
 Environment:
   CDP_URL          Chrome DevTools Protocol endpoint (required, e.g. http://localhost:9223)
-  OPENAI_API_KEY   Required for -q and -j (LLM extraction) features
 """
 
 import sys
@@ -30,6 +27,7 @@ import json
 import argparse
 import asyncio
 import subprocess
+import warnings
 
 # Fix UnicodeEncodeError on Windows with non-UTF-8 system locales (e.g. zh-CN/GBK).
 # Must run before crawl4ai imports rich, which auto-detects console encoding.
@@ -45,7 +43,7 @@ if sys.platform == "win32":
 def make_parser():
     p = argparse.ArgumentParser(
         prog="crwlr",
-        description="Web page crawler using crawl4ai with remote Chrome via CDP",
+        description="Web page fetcher using a real Chrome browser via CDP",
     )
     p.add_argument("--raw", action="store_true",
                    help="Call crwl directly (local browser, skip CDP config)")
@@ -57,18 +55,12 @@ def make_parser():
                        choices=["md", "md-fit", "json", "all"],
                        help="Output format (default: md)")
     crawl.add_argument("-O", "--save-to", dest="save_to",
-                       help="Save output to file")
-    crawl.add_argument("-q", "--question",
-                       help="Ask a question about the page (requires LLM)")
-    crawl.add_argument("-j", "--extract",
-                       help="Structured extraction instruction (requires LLM)")
-    crawl.add_argument("-s", "--schema",
-                       help="JSON schema file for extraction")
+                       help="Save output to file (recommended)")
     crawl.add_argument("--deep-crawl", dest="deep_crawl",
                        choices=["bfs", "dfs"],
                        help="Deep crawl strategy")
-    crawl.add_argument("--max-pages", dest="max_pages", type=int, default=10,
-                       help="Max pages for deep crawl (default: 10)")
+    crawl.add_argument("--max-depth", dest="max_depth", type=int, default=10,
+                       help="Max link-hop depth for deep crawl (default: 10)")
     crawl.add_argument("-bc", "--bypass-cache", dest="bypass_cache",
                        action="store_true", help="Bypass cache")
     crawl.add_argument("--raw-crawl", dest="raw_crawl", action="store_true",
@@ -101,32 +93,13 @@ async def run_crawl(args):
 
     # Deep crawl
     if args.deep_crawl:
-        from crawl4ai.deep_crawling import BFSDeepCrawlStrategy
-        strategy = BFSDeepCrawlStrategy(
-            max_depth=args.max_pages,
-        )
+        if args.deep_crawl == "dfs":
+            from crawl4ai.deep_crawling import DFSDeepCrawlStrategy
+            strategy = DFSDeepCrawlStrategy(max_depth=args.max_depth)
+        else:
+            from crawl4ai.deep_crawling import BFSDeepCrawlStrategy
+            strategy = BFSDeepCrawlStrategy(max_depth=args.max_depth)
         run_kwargs["deep_crawl_strategy"] = strategy
-
-    # LLM extraction (-q or -j)
-    extraction_strategy = None
-    if args.question or args.extract:
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if not api_key:
-            print("crwlr: -q and -j require OPENAI_API_KEY", file=sys.stderr)
-            print("  export OPENAI_API_KEY=sk-...", file=sys.stderr)
-            sys.exit(1)
-
-        from crawl4ai import LLMExtractionStrategy, LLMConfig
-        llm_config = LLMConfig(
-            provider="openai/gpt-4o-mini",
-            api_token=api_key,
-        )
-        instruction = args.question or args.extract
-        extraction_strategy = LLMExtractionStrategy(
-            llm_config=llm_config,
-            instruction=instruction,
-        )
-        run_kwargs["extraction_strategy"] = extraction_strategy
 
     run_config = CrawlerRunConfig(**run_kwargs)
 
@@ -136,9 +109,7 @@ async def run_crawl(args):
     # Format output
     output = None
 
-    if extraction_strategy and result.extracted_content:
-        output = result.extracted_content
-    elif args.output == "md":
+    if args.output == "md":
         output = result.markdown if isinstance(result.markdown, str) else result.markdown.raw_markdown
     elif args.output == "md-fit":
         md = result.markdown
@@ -204,7 +175,16 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    asyncio.run(run_crawl(args))
+    if sys.platform == "win32":
+        # Suppress ResourceWarning from asyncio ProactorEventLoop transport
+        # cleanup on Windows. The __del__ path triggers repr→fileno on
+        # already-closed pipes after asyncio.run() closes the loop.
+        # Scoped to this block only — genuine resource leaks elsewhere still warn.
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=ResourceWarning)
+            asyncio.run(run_crawl(args))
+    else:
+        asyncio.run(run_crawl(args))
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project Overview
 
 web-kit is a Claude Code skill plugin that gives AI agents three lightweight web primitives:
-search (ask-search), page reading (crwlr), and authenticated download (cdp-download).
+search (ask-search), fallback web fetch via Chrome (crwlr), and authenticated download (cdp-download).
 A self-hosted single-container backend (Docker) powers all three.
 
 ## Architecture
@@ -15,7 +15,7 @@ The repo has two independent halves connected only by environment variables:
 ```
 skills/
 ├── ask-search/   (SearxNG metasearch CLI)     ─┐
-├── crwlr/        (crawl4ai page reader)        ├── three independent skills
+├── crwlr/        (fallback Chrome fetcher)       ├── three independent skills
 └── cdp-download/ (CDP file downloader)        ─┘
        ↓ SEARXNG_URL, CDP_URL
 backend/          (Docker: SearxNG + Chrome + search-proxy)
@@ -64,7 +64,7 @@ No curl, no pip install, no manual setup beyond having `uv` in PATH.
 ```bash
 # Cross-platform invocation (works on Windows/macOS/Linux):
 uv run --script skills/ask-search/scripts/ask-search "query"
-uv run --script skills/crwlr/scripts/crwlr crawl -o md "https://example.com"
+uv run --script skills/crwlr/scripts/crwlr crawl -O page.md "https://example.com"
 uv run --script skills/cdp-download/scripts/cdp-download https://example.com/file.pdf
 ```
 

@@ -9,8 +9,8 @@
 ```
 ask-search "query" --num 5
   ↓ 看摘要，选 2-3 个最相关的 URL
-crwlr crawl -o md "url1" -O /tmp/page1.md
-crwlr crawl -o md "url2" -O /tmp/page2.md
+crwlr crawl -O /tmp/page1.md "url1"
+crwlr crawl -O /tmp/page2.md "url2"
   ↓ 对比多源内容
 综合分析，给出结论
 ```
@@ -29,11 +29,11 @@ crwlr crawl -o md "url2" -O /tmp/page2.md
 ask-search "graph neural network domain adaptation 2024" --categories science --num 10
 
 # 找到 arxiv 论文 → 读摘要页
-crwlr crawl -o md "https://arxiv.org/abs/xxxx.xxxxx"
+crwlr crawl -O /tmp/paper.md "https://arxiv.org/abs/xxxx.xxxxx"
 
 # 需要对比多篇 → 并行读
-crwlr crawl -o md "https://arxiv.org/abs/xxxx1" -O /tmp/paper1.md
-crwlr crawl -o md "https://arxiv.org/abs/xxxx2" -O /tmp/paper2.md
+crwlr crawl -O /tmp/paper1.md "https://arxiv.org/abs/xxxx1"
+crwlr crawl -O /tmp/paper2.md "https://arxiv.org/abs/xxxx2"
 ```
 
 要点：
@@ -53,39 +53,10 @@ ask-search "topic" --categories news --num 10
 ask-search "topic" --categories news --engines "reuters,google news,bing news" --num 5
 
 # 读具体报道
-crwlr crawl -o md "news-url" -O /tmp/news.md
+crwlr crawl -O /tmp/news.md "news-url"
 ```
 
-## 4. 深度爬取网站
-
-需要整个站点或一个目录下所有页面时。
-
-```bash
-# 广度优先爬 20 页
-crwlr crawl --deep-crawl bfs --max-pages 20 -o md "https://docs.example.com/"
-
-# 结果保存到文件
-crwlr crawl --deep-crawl bfs --max-pages 10 -o md -O /tmp/site.md "https://example.com/docs/"
-```
-
-要点：
-- `bfs` 适合文档站（先广后深），`dfs` 适合纵深内容
-- 大量页面用 `-O` 保存，不要 stdout
-- 加 `-bc` 绕过缓存确保内容最新
-
-## 5. 结构化数据提取
-
-从页面提取特定格式的数据。
-
-```bash
-# 提取表格/列表数据
-crwlr crawl -j "提取页面中所有论文标题、作者、年份，返回 JSON 数组" -o json "https://example.com/papers"
-
-# 用 schema 精确控制输出格式
-crwlr crawl -s schema.json -o json "https://example.com/products"
-```
-
-## 6. 搜索结果的二次处理
+## 4. 搜索结果的二次处理
 
 拿到搜索结果后批量读取。
 
@@ -93,13 +64,13 @@ crwlr crawl -s schema.json -o json "https://example.com/products"
 # 只拿 URL 列表
 ask-search "query" --urls-only --num 5
 
-# 逐个读取（或分给 sub-agent 并行）
+# 逐个读取保存
 for url in $(ask-search "query" --urls-only --num 3); do
-  crwlr crawl -bc -o md "$url"
+  crwlr crawl -O /tmp/page.md "$url"
 done
 ```
 
-## 7. 交给 sub-agent 的 prompt 模板
+## 5. 交给 sub-agent 的 prompt 模板
 
 当主 agent 需要分派搜索+阅读任务给 sub-agent 时：
 
@@ -111,7 +82,7 @@ done
 步骤建议：
 1. 用 ask-search skill 搜索相关信息
 2. 从结果中选取最相关的 3-5 个 URL
-3. 用 crwlr skill 读取这些页面的全文
+3. 用 crwlr skill 读取这些页面，保存到文件
 4. 综合多源信息，给出分析结论
 
 注意：

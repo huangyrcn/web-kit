@@ -6,21 +6,26 @@
 """
 Download files via Chrome DevTools Protocol (CDP).
 
-Uses Network.loadNetworkResource + IO.read to download files through a remote
-Chrome instance. Supports authentication/cookies via includeCredentials.
+Three strategies (tried in order):
+  1. Network.loadNetworkResource + IO.read (fast, streaming)
+  2. Fetch.requestPaused + Page.navigate (bypasses CSP)
+  3. Interactive: prompts user to solve reCAPTCHA via noVNC, then retries (opt-in)
 
 Usage:
     cdp-download <url> [output_file]
-    cdp-download https://arxiv.org/pdf/2002.05287.pdf paper.pdf
+    cdp-download <url> [output_file] --interactive
 
 Environment:
-    CDP_URL - Chrome DevTools Protocol endpoint (required, e.g. http://localhost:9223)
+    CDP_URL        - Chrome DevTools Protocol endpoint (required, e.g. http://localhost:9223)
+    NOVNC_URL      - noVNC web client URL (auto-derived from CDP_URL if not set)
 """
 
 import sys
 import os
 import json
 import base64
+import time
+import tempfile
 import urllib.request
 import urllib.parse
 import websocket
@@ -45,6 +50,17 @@ def get_cdp_url():
     return url
 
 
+def get_novnc_url():
+    """Get noVNC URL, derived from CDP_URL host on port 6080."""
+    explicit = os.environ.get("NOVNC_URL")
+    if explicit:
+        return explicit
+    cdp = get_cdp_url()
+    parsed = urllib.parse.urlparse(cdp)
+    host = parsed.hostname or "localhost"
+    return f"http://{host}:6080"
+
+
 def get_page_ws_url(cdp_url):
     """Get WebSocket URL for a page target."""
     targets_url = f"{cdp_url}/json"
@@ -53,74 +69,162 @@ def get_page_ws_url(cdp_url):
     except Exception as e:
         raise RuntimeError(f"Failed to connect to CDP at {cdp_url}: {e}")
 
-    # Find existing page or create one
     for t in targets:
         if t.get("type") == "page":
             return t["webSocketDebuggerUrl"]
 
-    # No page found, get browser WS and create a page
     version_url = f"{cdp_url}/json/version"
     browser_info = json.loads(urllib.request.urlopen(version_url, timeout=10).read())
     browser_ws = browser_info["webSocketDebuggerUrl"]
 
+    # Create a new page target; keep browser ws open to clean up on failure.
     ws = websocket.create_connection(browser_ws)
-    ws.send(json.dumps({"id": 1, "method": "Target.createTarget", "params": {"url": "about:blank"}}))
-    result = json.loads(ws.recv())
-    ws.close()
+    try:
+        ws.send(json.dumps({"id": 1, "method": "Target.createTarget", "params": {"url": "about:blank"}}))
+        result = json.loads(ws.recv())
 
-    if "result" not in result:
-        raise RuntimeError(f"Failed to create page: {result}")
+        if "result" not in result:
+            raise RuntimeError(f"Failed to create page: {result}")
 
-    # Wait and get new page WS
-    import time
-    time.sleep(0.5)
-    targets = json.loads(urllib.request.urlopen(targets_url, timeout=10).read())
-    for t in targets:
-        if t.get("type") == "page":
-            return t["webSocketDebuggerUrl"]
+        target_id = result["result"]["targetId"]
 
-    raise RuntimeError("Failed to get page WebSocket URL")
+        time.sleep(0.5)
+        targets = json.loads(urllib.request.urlopen(targets_url, timeout=10).read())
+        for t in targets:
+            if t.get("type") == "page":
+                return t["webSocketDebuggerUrl"]
+
+        # Page not found in target list — clean up the zombie tab
+        ws.send(json.dumps({"id": 2, "method": "Target.closeTarget",
+                            "params": {"targetId": target_id}}))
+        ws.recv()
+        raise RuntimeError("Failed to get page WebSocket URL")
+
+    finally:
+        ws.close()
 
 
-def download(url, output_path=None, cdp_url=None):
-    """Download a file via CDP."""
-    if cdp_url is None:
-        cdp_url = get_cdp_url()
+def _ws_send_recv(ws, msg_id, method, params=None):
+    """Send a CDP command and receive the matching response, skipping events.
 
-    # Get output filename
-    if output_path is None:
-        # Extract filename from URL
-        parsed = urllib.parse.urlparse(url)
-        filename = os.path.basename(parsed.path)
-        if not filename:
-            filename = "download"
-        output_path = filename
+    Note: discarded events are lost. Callers in Fetch-enabled contexts should
+    use _get_fetch_body() instead, which handles Fetch.requestPaused events
+    without discarding them.
+    """
+    msg = {"id": msg_id, "method": method}
+    if params:
+        msg["params"] = params
+    ws.send(json.dumps(msg))
+    while True:
+        result = json.loads(ws.recv())
+        if "id" in result and result["id"] == msg_id:
+            return result
 
-    # Connect to page
+
+def _resolve_output_path(url, output_path):
+    if output_path is not None:
+        return output_path
+    parsed = urllib.parse.urlparse(url)
+    filename = os.path.basename(parsed.path)
+    return filename if filename else "download"
+
+
+def _decode_cdp_body(body_dict):
+    """Decode a CDP response body (IO.read chunk or Fetch.getResponseBody result).
+
+    Handles base64-encoded and text bodies. When base64Encoded is False for
+    binary content, falls back to latin-1 to preserve raw byte values.
+    """
+    data = body_dict["data"]
+    if body_dict.get("base64Encoded"):
+        return base64.b64decode(data)
+    try:
+        return data.encode("utf-8")
+    except UnicodeEncodeError:
+        return data.encode("latin-1")
+
+
+def _atomic_write(data_bytes, dest_path):
+    """Write data to a temp file, then atomically replace dest_path."""
+    out_abs = os.path.abspath(dest_path)
+    tmp_dir = os.path.dirname(out_abs)
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=tmp_dir, suffix=".part")
+    os.close(tmp_fd)
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(data_bytes)
+        os.replace(tmp_path, out_abs)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
+
+def _stream_to_file(ws, stream_handle, content_length, output_path):
+    """Stream CDP IO.read chunks to a temp file, atomic replace on success."""
+    tmp_dir = os.path.dirname(os.path.abspath(output_path))
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=tmp_dir, suffix=".part")
+    os.close(tmp_fd)
+    msg_id = 3
+    bytes_written = 0
+    total = 0
+    if content_length != "unknown":
+        try:
+            total = int(content_length)
+        except (ValueError, TypeError):
+            pass
+    try:
+        with open(tmp_path, "wb") as f:
+            while True:
+                read_result = _ws_send_recv(ws, msg_id, "IO.read", {
+                    "handle": stream_handle,
+                    "size": 1024 * 1024
+                })
+                msg_id += 1
+
+                if "error" in read_result:
+                    raise RuntimeError(f"IO.read error: {read_result['error']}")
+
+                chunk = read_result["result"]
+                payload = _decode_cdp_body(chunk)
+
+                f.write(payload)
+                bytes_written += len(payload)
+
+                if total > 0:
+                    percent = bytes_written * 100 // total
+                    print(f"\rDownloading: {percent}% ({bytes_written}/{total} bytes)",
+                          end="", flush=True)
+
+                if chunk.get("eof"):
+                    break
+
+        os.replace(tmp_path, output_path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
+    print()
+    print(f"Saved: {output_path} ({bytes_written} bytes)")
+    return output_path
+
+
+def _download_via_stream(url, output_path, cdp_url):
+    """Strategy 1: Network.loadNetworkResource + IO.read (streaming)."""
+    output_path = _resolve_output_path(url, output_path)
     ws_url = get_page_ws_url(cdp_url)
-    ws = websocket.create_connection(ws_url)
+    ws = websocket.create_connection(ws_url, timeout=120)
 
     try:
-        # Get frameId
-        ws.send(json.dumps({"id": 1, "method": "Page.getFrameTree"}))
-        result = json.loads(ws.recv())
+        result = _ws_send_recv(ws, 1, "Page.getFrameTree")
         frame_id = result["result"]["frameTree"]["frame"]["id"]
 
-        # Load resource
-        ws.send(json.dumps({
-            "id": 2,
-            "method": "Network.loadNetworkResource",
-            "params": {
-                "frameId": frame_id,
-                "url": url,
-                "options": {
-                    "disableCache": True,
-                    "includeCredentials": True
-                }
-            }
-        }))
-
-        result = json.loads(ws.recv())
+        result = _ws_send_recv(ws, 2, "Network.loadNetworkResource", {
+            "frameId": frame_id,
+            "url": url,
+            "options": {"disableCache": True, "includeCredentials": True}
+        })
 
         if "error" in result:
             raise RuntimeError(f"CDP error: {result['error']}")
@@ -131,6 +235,9 @@ def download(url, output_path=None, cdp_url=None):
             raise RuntimeError(f"Failed to load resource: HTTP {resource.get('httpStatusCode')}")
 
         http_status = resource.get("httpStatusCode", 0)
+        if http_status >= 400:
+            raise RuntimeError(f"Failed to load resource: HTTP {http_status}")
+
         headers = resource.get("headers", {})
         content_length = headers.get("content-length", "unknown")
         content_type = headers.get("content-type", "unknown")
@@ -142,80 +249,250 @@ def download(url, output_path=None, cdp_url=None):
         if "stream" not in resource:
             raise RuntimeError("No stream in response")
 
-        stream_handle = resource["stream"]
-
-        # Stream chunks directly to disk. Previously this accumulated the
-        # whole response into a bytes() buffer before writing — fine for a
-        # 100 KB PDF, fragile for a 100 MB one.
-        # Write to a temp file first, then rename on success.
-        # Avoids leaving a partial file on disk if the download fails mid-stream.
-        import tempfile
-        tmp_dir = os.path.dirname(os.path.abspath(output_path))
-        tmp_fd, tmp_path = tempfile.mkstemp(dir=tmp_dir, suffix=".part")
-        os.close(tmp_fd)
-        msg_id = 3
-        bytes_written = 0
-        try:
-            with open(tmp_path, "wb") as f:
-                while True:
-                    ws.send(json.dumps({
-                        "id": msg_id,
-                        "method": "IO.read",
-                        "params": {
-                            "handle": stream_handle,
-                            "size": 1024 * 1024  # 1 MB per CDP read
-                        }
-                    }))
-                    msg_id += 1
-                    read_result = json.loads(ws.recv())
-
-                    if "error" in read_result:
-                        raise RuntimeError(f"IO.read error: {read_result['error']}")
-
-                    chunk = read_result["result"]
-                    if chunk.get("base64Encoded"):
-                        payload = base64.b64decode(chunk["data"])
-                    else:
-                        payload = chunk["data"].encode()
-
-                    f.write(payload)
-                    bytes_written += len(payload)
-
-                    # Progress
-                    if content_length != "unknown":
-                        total = int(content_length)
-                        percent = bytes_written * 100 // total if total > 0 else 100
-                        print(f"\rDownloading: {percent}% ({bytes_written}/{total} bytes)",
-                              end="", flush=True)
-
-                    if chunk.get("eof"):
-                        break
-
-            os.replace(tmp_path, output_path)
-        except Exception:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-            raise
-
-        print()  # newline after progress
-        print(f"Saved: {output_path} ({bytes_written} bytes)")
-        return output_path
+        return _stream_to_file(ws, resource["stream"], content_length, output_path)
 
     finally:
         ws.close()
 
 
-def main():
-    if len(sys.argv) < 2:
-        print(__doc__)
-        sys.exit(1)
+def _is_recaptcha_html(body_bytes):
+    """Check if HTML body looks like a CAPTCHA / bot-detection page."""
+    snippet = body_bytes[:4096].decode("utf-8", errors="ignore").lower()
+    markers = ["captcha", "recaptcha", "verify you are human",
+                "access denied", "blocked by"]
+    return any(m in snippet for m in markers)
 
-    url = sys.argv[1]
-    output_path = sys.argv[2] if len(sys.argv) > 2 else None
-    cdp_url = get_cdp_url()
+
+def _get_fetch_body(ws, msg_id, req_id, status):
+    """Get response body for a paused Fetch request and continue it.
+
+    Handles redirects automatically: if status is 3xx, continues the request
+    and returns (next_msg_id, b"") to signal the caller to keep looping.
+    For non-redirect responses, returns (next_msg_id, body_bytes).
+    """
+    if 300 <= status < 400:
+        _ws_send_recv(ws, msg_id, "Fetch.continueRequest",
+                      {"requestId": req_id})
+        return msg_id + 1, b""
+
+    body_resp = _ws_send_recv(ws, msg_id, "Fetch.getResponseBody",
+                              {"requestId": req_id})
+    msg_id += 1
+    _ws_send_recv(ws, msg_id, "Fetch.continueRequest",
+                  {"requestId": req_id})
+    msg_id += 1
+
+    if "error" in body_resp:
+        raise RuntimeError(f"Fetch.getResponseBody error: {body_resp['error']}")
+
+    return msg_id, _decode_cdp_body(body_resp["result"])
+
+
+def _prompt_recaptcha_solve(ws, url, output_path, msg_id):
+    """Handle reCAPTCHA: prompt user via noVNC, then retry download.
+
+    Returns (next_msg_id, output_path), or raises if failed.
+    """
+    novnc_url = get_novnc_url()
+    print(f"\n{'='*60}")
+    print(f"  reCAPTCHA detected. Manual verification required.")
+    print(f"{'='*60}")
+    print(f"")
+    print(f"  1. Open in browser: {novnc_url}")
+    print(f"  2. reCAPTCHA should appear in the Chrome window")
+    print(f"  3. Check 'I'm not a robot', complete any image challenge")
+    print(f"  4. Wait for the page to finish loading")
+    print(f"  5. Come back here and press Enter")
+    print(f"{'='*60}")
+    sys.stdout.flush()
 
     try:
-        download(url, output_path, cdp_url)
+        sys.stdin.readline()
+    except (EOFError, KeyboardInterrupt):
+        raise RuntimeError("User cancelled reCAPTCHA verification")
+
+    print("Retrying download after reCAPTCHA verification...")
+
+    # Re-navigate to the PDF URL — the session cookie should now be set.
+    _ws_send_recv(ws, msg_id, "Page.navigate", {"url": url})
+    msg_id += 1
+
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        ws.settimeout(max(1, deadline - time.time()))
+        try:
+            raw = ws.recv()
+        except websocket.WebSocketTimeoutException:
+            break
+        msg = json.loads(raw)
+
+        if msg.get("method") != "Fetch.requestPaused":
+            continue
+
+        params = msg["params"]
+        req_id = params["requestId"]
+        status = params.get("responseStatusCode", 0)
+        headers = {h["name"].lower(): h["value"]
+                   for h in params.get("responseHeaders", [])}
+        ct = headers.get("content-type", "")
+
+        msg_id, body = _get_fetch_body(ws, msg_id, req_id, status)
+        if not body:
+            continue  # redirect was auto-continued
+
+        print(f"Retry: HTTP {status}, Content-Type: {ct}")
+
+        if body[:4] == b"%PDF":
+            _atomic_write(body, output_path)
+            print(f"Saved: {output_path} ({len(body)} bytes)")
+            return msg_id, output_path
+
+        if _is_recaptcha_html(body):
+            raise RuntimeError(
+                "Still blocked by reCAPTCHA after verification. "
+                "Please try again or download manually."
+            )
+
+        break
+
+    raise RuntimeError("Did not receive PDF after reCAPTCHA verification")
+
+
+def _download_via_navigate(url, output_path, cdp_url, interactive=False):
+    """Strategy 2: Fetch interception + Page.navigate (bypasses CSP).
+
+    With interactive=True, detects reCAPTCHA and prompts user to solve via noVNC.
+    """
+
+    output_path = _resolve_output_path(url, output_path)
+    ws_url = get_page_ws_url(cdp_url)
+    ws = websocket.create_connection(ws_url, timeout=120)
+
+    try:
+        parsed = urllib.parse.urlparse(url)
+        host_pattern = f"*://{parsed.netloc}/*"
+        _ws_send_recv(ws, 1, "Fetch.enable", {
+            "patterns": [
+                {"urlPattern": url, "requestStage": "Response"},
+                {"urlPattern": host_pattern, "requestStage": "Response"},
+            ]
+        })
+
+        _ws_send_recv(ws, 2, "Page.navigate", {"url": url})
+
+        saved_path = None
+        deadline = time.time() + 90
+        msg_id = 100
+
+        while time.time() < deadline:
+            ws.settimeout(max(1, deadline - time.time()))
+            try:
+                raw = ws.recv()
+            except websocket.WebSocketTimeoutException:
+                break
+            msg = json.loads(raw)
+
+            if msg.get("method") != "Fetch.requestPaused":
+                continue
+
+            params = msg["params"]
+            req_id = params["requestId"]
+            status = params.get("responseStatusCode", 0)
+            headers = {h["name"].lower(): h["value"]
+                       for h in params.get("responseHeaders", [])}
+            ct = headers.get("content-type", "")
+
+            # Handle redirects — auto-continue and keep listening
+            msg_id, body = _get_fetch_body(ws, msg_id, req_id, status)
+            if not body:
+                continue
+
+            print(f"HTTP {status}")
+            print(f"Content-Type: {ct}")
+
+            # Check for reCAPTCHA on any HTML response
+            if "text/html" in ct and _is_recaptcha_html(body):
+                if not interactive:
+                    raise RuntimeError(
+                        "Server returned HTML instead of the requested file (likely reCAPTCHA). "
+                        "Retry with --interactive to solve via noVNC."
+                    )
+                msg_id, saved_path = _prompt_recaptcha_solve(ws, url, output_path, msg_id)
+                break
+
+            # Accept any non-HTML 200 response with content as a binary download
+            if status == 200 and "text/html" not in ct and len(body) > 0:
+                _atomic_write(body, output_path)
+                print(f"Saved: {output_path} ({len(body)} bytes)")
+                saved_path = output_path
+                break
+
+            # Fall back to PDF magic-byte check for responses without clear content-type
+            if status == 200 and body[:4] == b"%PDF":
+                _atomic_write(body, output_path)
+                print(f"Saved: {output_path} ({len(body)} bytes)")
+                saved_path = output_path
+                break
+
+            # Not a downloadable response — report and give up
+            print(f"  Response preview: {body[:200]}", file=sys.stderr)
+            break
+
+        if saved_path is None:
+            raise RuntimeError("No downloadable response captured (timeout or non-binary)")
+
+        return saved_path
+
+    finally:
+        try:
+            _ws_send_recv(ws, 9998, "Fetch.disable")
+        except Exception:
+            pass
+        try:
+            _ws_send_recv(ws, 9999, "Page.navigate", {"url": "about:blank"})
+        except Exception:
+            pass
+        ws.close()
+
+
+def download(url, output_path=None, cdp_url=None, interactive=False):
+    """Download a file via CDP.
+
+    Tries Network.loadNetworkResource (streaming) first.
+    Falls back to Fetch + Page.navigate on CSP/HTTP errors.
+    With interactive=True, prompts for noVNC reCAPTCHA solving.
+    """
+    if cdp_url is None:
+        cdp_url = get_cdp_url()
+
+    try:
+        return _download_via_stream(url, output_path, cdp_url)
+    except (RuntimeError, websocket.WebSocketException) as e:
+        err = str(e).lower()
+        # Match CSP violations, HTTP 4xx/5xx, and missing-stream errors
+        # that indicate the stream strategy failed but navigate may succeed.
+        if any(kw in err for kw in (
+            "csp", "content security",
+            "err_blocked", "blocked by",
+            "http 4", "http 5",
+            "no stream", "failed to load resource",
+        )):
+            print(f"  Stream download failed ({e}), retrying with navigate...")
+            return _download_via_navigate(url, output_path, cdp_url, interactive)
+        raise
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Download files via Chrome DevTools Protocol")
+    parser.add_argument("url", help="URL to download")
+    parser.add_argument("output", nargs="?", help="Output file path")
+    parser.add_argument("--interactive", "-i", action="store_true",
+                        help="Prompt for noVNC reCAPTCHA solving when blocked")
+    args = parser.parse_args()
+
+    try:
+        download(args.url, args.output, interactive=args.interactive)
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
