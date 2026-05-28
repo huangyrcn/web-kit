@@ -52,7 +52,13 @@ ask-search "graph neural network site:arxiv.org OR site:openalex.org"
 
 # 新闻
 ask-search "AI regulation" -c news
+
+# 限定时间（Google 查询语法）
+ask-search "LLM agent after:2025"
+ask-search "RAG 2024 site:arxiv.org"
 ```
+
+时间语法：`after:2025`、`before:2024`、`2024..2025`（Google 原生支持）。
 
 也可用 `-e` 指定 API 引擎（不经浏览器），但部分引擎可能超时：
 ```bash

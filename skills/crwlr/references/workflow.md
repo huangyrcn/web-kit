@@ -11,43 +11,45 @@ crwlr crawl -O /tmp/page2.md "url2"
 综合分析，给出结论
 ```
 
-要点：
-- 搜索用 `-n 5` 少量结果快速筛选
-- 阅读用 `-O` 保存到文件，避免 stdout 截断
-- 多源交叉验证，不要只依赖一个来源
+## 2. 搜索策略
 
-## 2. 学术文献调研
-
-**优先用 Google `site:`，不要用 `-e arxiv`（arxiv API 有限流）：**
+**优先级：Google → Bing → 其他**
 
 ```bash
-# 学术搜索（推荐）
-ask-search "graph neural network domain adaptation 2024 site:arxiv.org" -n 10
+# 默认走 Google（最可靠）
+ask-search "query"
 
-# 多站点
-ask-search "hypergraph self-supervised site:arxiv.org OR site:openalex.org" -n 10
+# 限定站点（Google site: 语法）
+ask-search "transformer attention site:arxiv.org"
+ask-search "react hooks site:github.com"
+ask-search "fastapi site:pypi.org"
 
-# 读论文
-crwlr crawl -O /tmp/paper.md "https://arxiv.org/abs/xxxx.xxxxx"
+# 限定时间（Google 查询语法）
+ask-search "LLM agent after:2025"
+ask-search "RAG 2024 site:arxiv.org"
+
+# 用 Bing 等其他引擎（备选）
+ask-search "query" -e bing
+ask-search "query" -e bing,semantic_scholar
 ```
 
 要点：
-- `site:arxiv.org` 搜 arXiv，`site:openalex.org` 搜 OpenAlex
-- arxiv 的 `/abs/` 是摘要，`/html/` 是全文 HTML
-- `-e arxiv` 直接打 API 有限流，不推荐作为首选
+- 默认 Google，够用就不要换
+- `site:` 限定域名比 `-e` 指定 API 引擎更可靠
+- Google 时间语法：`after:2025`、`before:2024`、`2024..2025`
+- `-e arxiv` 直接打 API 有限流，不推荐
 
-## 3. 新闻追踪
+## 3. 读取页面
 
 ```bash
-ask-search "topic" -c news -n 10
-crwlr crawl -O /tmp/news.md "news-url"
+crwlr crawl -O /tmp/page.md "url"    # 保存到文件（推荐）
+crwlr crawl -o md "url"               # 输出到 stdout
 ```
 
-## 4. 搜索结果批量读取
+## 4. 批量处理
 
 ```bash
-ask-search "query" -u -n 5    # 只拿 URL 列表
-# 逐个读取保存
+# 搜索 → 拿 URL 列表 → 逐个读取
 for url in $(ask-search "query" -u -n 3); do
   crwlr crawl -O /tmp/page.md "$url"
 done
@@ -59,8 +61,8 @@ done
 目标：[描述要调研什么]
 
 步骤：
-1. 用 ask-search "xxx site:arxiv.org" 搜索论文
-2. 从结果中选 3-5 个最相关的 URL
+1. 用 ask-search "xxx site:arxiv.org" 搜索
+2. 选 3-5 个最相关的 URL
 3. 用 crwlr crawl -O /tmp/xxx.md 读取页面
-4. 综合多源信息，给出分析结论
+4. 综合分析，给出结论
 ```
