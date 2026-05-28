@@ -30,7 +30,7 @@ from patchright.async_api import async_playwright
 
 CDP_URL = os.environ.get("CDP_URL", "http://localhost:9222")
 PORT = int(os.environ.get("PORT", "3100"))
-MAX_CONCURRENCY = int(os.environ.get("SEARCH_PROXY_CONCURRENCY", "3"))
+MAX_CONCURRENCY = int(os.environ.get("SEARCH_PROXY_CONCURRENCY", "5"))
 FAILURE_CACHE_SECONDS = int(os.environ.get("FAILURE_CACHE_SECONDS", "15"))
 
 logger = logging.getLogger("search-proxy")
@@ -46,6 +46,10 @@ _failure_cache: dict[str, float] = {}
 # Without this, every /open call leaks a new page target into Chrome.
 _manual_page = None
 _manual_page_lock = asyncio.Lock()
+
+# arXiv rate-limits concurrent requests from the same IP.  Serialize access so
+# only one Chrome page hits arxiv.org at a time, avoiding cascading timeouts.
+_arxiv_lock = asyncio.Lock()
 
 
 async def _warmup_browser(browser):
@@ -672,46 +676,49 @@ async def search_arxiv(q: str = Query(..., min_length=1), limit: int = Query(10,
     except Exception as e:
         return JSONResponse({"error": f"chrome unreachable: {e}", "results": []}, status_code=503)
 
-    try:
-        await asyncio.wait_for(_page_sem.acquire(), timeout=30)
-    except asyncio.TimeoutError:
-        return JSONResponse({"error": "queue timeout", "results": []}, status_code=503)
+    # Serialize arxiv requests: arxiv.org rate-limits concurrent access from
+    # the same IP, so only one Chrome page hits it at a time.
+    async with _arxiv_lock:
+        try:
+            await asyncio.wait_for(_page_sem.acquire(), timeout=30)
+        except asyncio.TimeoutError:
+            return JSONResponse({"error": "queue timeout", "results": []}, status_code=503)
 
-    page = None
-    try:
-        ctx = await _get_context(browser)
-        page = await ctx.new_page()
-        url = f"https://arxiv.org/search/?query={quote_plus(q)}&searchtype=all"
+        page = None
+        try:
+            ctx = await _get_context(browser)
+            page = await ctx.new_page()
+            url = f"https://arxiv.org/search/?query={quote_plus(q)}&searchtype=all"
 
-        _transient = ("ERR_CONNECTION_CLOSED", "ERR_CONNECTION_RESET",
-                      "ERR_CONNECTION_REFUSED", "ERR_NAME_NOT_RESOLVED")
-        for attempt in range(2):
-            try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=20000)
-                break
-            except Exception as e:
-                if attempt == 0 and any(t in str(e) for t in _transient):
-                    logger.warning("arXiv: transient error on attempt 1, retrying: %s", e)
+            _transient = ("ERR_CONNECTION_CLOSED", "ERR_CONNECTION_RESET",
+                          "ERR_CONNECTION_REFUSED", "ERR_NAME_NOT_RESOLVED")
+            for attempt in range(2):
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                    break
+                except Exception as e:
+                    if attempt == 0 and any(t in str(e) for t in _transient):
+                        logger.warning("arXiv: transient error on attempt 1, retrying: %s", e)
+                        await page.close()
+                        page = await ctx.new_page()
+                        await asyncio.sleep(2)
+                        continue
+                    raise
+
+            html = await page.content()
+            results = _parse_arxiv_html(html, limit)
+            return {"query": q, "engine": "arxiv", "results": results}
+        except Exception as e:
+            logger.exception("arXiv search failed")
+            _record_failure("arxiv")
+            return JSONResponse({"error": str(e), "results": []}, status_code=500)
+        finally:
+            if page is not None:
+                try:
                     await page.close()
-                    page = await ctx.new_page()
-                    await asyncio.sleep(2)
-                    continue
-                raise
-
-        html = await page.content()
-        results = _parse_arxiv_html(html, limit)
-        return {"query": q, "engine": "arxiv", "results": results}
-    except Exception as e:
-        logger.exception("arXiv search failed")
-        _record_failure("arxiv")
-        return JSONResponse({"error": str(e), "results": []}, status_code=500)
-    finally:
-        if page is not None:
-            try:
-                await page.close()
-            except Exception:
-                pass
-        _page_sem.release()
+                except Exception:
+                    pass
+            _page_sem.release()
 
 
 # ─── Google Scholar (via Chrome CDP) ─────────────────────────────────────────
