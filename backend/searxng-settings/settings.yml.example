@@ -68,9 +68,18 @@ engines:
     disabled: false
 
   - name: arxiv
-    engine: arxiv
+    engine: json_engine
     shortcut: arx
+    search_url: http://localhost:3100/arxiv?q={query}&limit=10
+    enable_http: true
+    results_query: results
+    url_query: url
+    title_query: title
+    content_query: content
+    categories: [science]
     disabled: false
+    timeout: 15.0
+    paging: false
 
   - name: google scholar
     engine: google_scholar

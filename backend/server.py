@@ -9,6 +9,7 @@ Reliability features added on top of the original:
 Endpoints:
   /google?q=xxx   → Google search
   /ddg?q=xxx      → DuckDuckGo search
+  /arxiv?q=xxx    → arXiv search (direct HTTP, no Chrome)
   /open?url=xxx   → Open URL for manual interaction via VNC
   /health         → health check
 """
@@ -16,6 +17,7 @@ Endpoints:
 import asyncio
 import logging
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from urllib.parse import parse_qs, quote_plus, urlparse
@@ -462,6 +464,156 @@ async def search_ddg(q: str = Query(..., min_length=1), limit: int = Query(10, g
     except Exception as e:
         logger.exception("DDG search failed")
         _record_failure("ddg")
+        return JSONResponse({"error": str(e), "results": []}, status_code=500)
+    finally:
+        if page is not None:
+            try:
+                await page.close()
+            except Exception:
+                pass
+        _page_sem.release()
+
+
+# ─── arXiv (via Chrome, same pattern as Google/DDG) ───────────────────────────
+
+_ARXIV_RESULT_RE = re.compile(
+    r'<li class="arxiv-result">(.*?)</li>',
+    re.DOTALL,
+)
+_ARXIV_ID_RE = re.compile(r'arXiv:(\d+\.\d+)')
+_ARXIV_TITLE_RE = re.compile(r'<p class="title[^"]*">\s*(.*?)\s*</p>', re.DOTALL)
+_ARXIV_AUTHOR_RE = re.compile(r'<p class="authors">(.*?)</p>', re.DOTALL)
+_ARXIV_AUTHOR_LINK_RE = re.compile(r'<a[^>]*>(.*?)</a>')
+_ARXIV_TAG_RE = re.compile(r'<[^>]+>')
+_ARXIV_CAT_RE = re.compile(
+    r'<span class="tag[^"]*"[^>]*>(.*?)</span>'
+)
+_ARXIV_PDF_RE = re.compile(r'href="([^"]*/pdf/[^"]*)"')
+_ARXIV_SUBMITTED_RE = re.compile(
+    r'<span[^>]*>Submitted</span>\s*(.*?);\s*'
+)
+
+
+def _parse_arxiv_html(html: str, limit: int) -> list[dict]:
+    results: list[dict] = []
+    for m in _ARXIV_RESULT_RE.finditer(html):
+        if len(results) >= limit:
+            break
+        block = m.group(1)
+
+        id_m = _ARXIV_ID_RE.search(block)
+        if not id_m:
+            continue
+        arxiv_id = id_m.group(1)
+        url = f"https://arxiv.org/abs/{arxiv_id}"
+
+        title_m = _ARXIV_TITLE_RE.search(block)
+        title = _ARXIV_TAG_RE.sub("", title_m.group(1)).strip() if title_m else ""
+        if not title:
+            continue
+
+        # Authors
+        authors: list[str] = []
+        author_m = _ARXIV_AUTHOR_RE.search(block)
+        if author_m:
+            authors = _ARXIV_AUTHOR_LINK_RE.findall(author_m.group(1))
+
+        # Categories / tags
+        tags = _ARXIV_CAT_RE.findall(block)
+
+        # PDF URL
+        pdf_url = ""
+        pdf_m = _ARXIV_PDF_RE.search(block)
+        if pdf_m:
+            pdf_url = pdf_m.group(1)
+
+        # Submitted date
+        published_date = ""
+        sub_m = _ARXIV_SUBMITTED_RE.search(block)
+        if sub_m:
+            published_date = sub_m.group(1).strip()
+
+        # Comments (e.g. "accepted by ICML 2026")
+        comments = ""
+        com_m = re.search(
+            r'<span[^>]*>Comments:</span>\s*(.*?)</p>', block, re.DOTALL
+        )
+        if com_m:
+            comments = _ARXIV_TAG_RE.sub("", com_m.group(1)).strip()
+
+        # Abstract: find abstract-full span, take everything after its opening
+        # tag until end of block, then strip HTML.
+        abstract = ""
+        abs_idx = block.find('class="abstract-full')
+        if abs_idx >= 0:
+            gt = block.find(">", abs_idx)
+            if gt >= 0:
+                raw = block[gt + 1 :]
+                abstract = _ARXIV_TAG_RE.sub("", raw).strip()
+                for marker in ("△ Less", "▽ Less"):
+                    idx = abstract.find(marker)
+                    if idx >= 0:
+                        abstract = abstract[:idx].strip()
+
+        results.append({
+            "title": title,
+            "url": url,
+            "content": abstract,
+            "authors": authors,
+            "publishedDate": published_date,
+            "comments": comments,
+            "tags": tags,
+            "pdf_url": pdf_url,
+        })
+    return results
+
+
+@app.get("/arxiv")
+async def search_arxiv(q: str = Query(..., min_length=1), limit: int = Query(10, ge=1, le=50)):
+    quarantine = _check_failure("arxiv")
+    if quarantine is not None:
+        return JSONResponse(
+            {"error": f"arxiv quarantined for {int(quarantine)}s after recent failure", "results": []},
+            status_code=503,
+        )
+
+    try:
+        browser = await _ensure_browser()
+    except Exception as e:
+        return JSONResponse({"error": f"chrome unreachable: {e}", "results": []}, status_code=503)
+
+    try:
+        await asyncio.wait_for(_page_sem.acquire(), timeout=30)
+    except asyncio.TimeoutError:
+        return JSONResponse({"error": "queue timeout", "results": []}, status_code=503)
+
+    page = None
+    try:
+        ctx = await _get_context(browser)
+        page = await ctx.new_page()
+        url = f"https://arxiv.org/search/?query={quote_plus(q)}&searchtype=all"
+
+        _transient = ("ERR_CONNECTION_CLOSED", "ERR_CONNECTION_RESET",
+                      "ERR_CONNECTION_REFUSED", "ERR_NAME_NOT_RESOLVED")
+        for attempt in range(2):
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                break
+            except Exception as e:
+                if attempt == 0 and any(t in str(e) for t in _transient):
+                    logger.warning("arXiv: transient error on attempt 1, retrying: %s", e)
+                    await page.close()
+                    page = await ctx.new_page()
+                    await asyncio.sleep(2)
+                    continue
+                raise
+
+        html = await page.content()
+        results = _parse_arxiv_html(html, limit)
+        return {"query": q, "engine": "arxiv", "results": results}
+    except Exception as e:
+        logger.exception("arXiv search failed")
+        _record_failure("arxiv")
         return JSONResponse({"error": str(e), "results": []}, status_code=500)
     finally:
         if page is not None:
