@@ -13,43 +13,48 @@ crwlr crawl -O /tmp/page2.md "url2"
 
 ## 2. 搜索策略
 
-先用默认 Google；只有默认结果质量不足，或用户明确指定来源/引擎时，才用 `-e` 升级。
+### 可用的搜索引擎
 
-```bash
-# 通用搜索 / 默认第一跳
-ask-search "query"
+ask-search 支持多种引擎，默认是 Google。可以按任务需要选择：
 
-# 学术论文：第一跳仍然用默认 Google
-ask-search "graph neural network paper 2025"
+| 领域 | 引擎 |
+|---|---|
+| 通用 | google, bing, duckduckgo |
+| 学术 | google_scholar, semantic_scholar, openalex, dblp, pubmed, arxiv |
+| 代码 / 包管理 | github, github_code, gitlab, huggingface, npm, pypi, crates, lib_rs, pkg_go_dev, sourcehut, microsoft_learn, nvd |
+| 社区 | hackernews, reddit, wikidata |
+| 图书 | annas_archive, zlibrary |
 
-# 学术论文：默认结果不足后再升级到稳定学术源
-ask-search "graph neural network paper 2025" -e google_scholar,semantic_scholar,openalex
+### 典型搜索流程
 
-# 学术 + 限定站点（通常比直接打 arXiv engine 稳）
-ask-search "hypergraph self-supervised site:arxiv.org"
+一条实用的搜索流程是：
 
-# 明确需要 arXiv 时才用 arXiv engine
-ask-search "known paper title or arXiv id" -e arxiv
+1. **先用默认搜索**：`ask-search "query"`  
+   默认搜索已经覆盖论文聚合站、repo、博客、文档、论坛等广泛来源。
+   如果结果已经足够，通常不需要再切换引擎。
 
-# 限定时间
-ask-search "LLM agent after:2025"
+2. **观察结果来自哪个领域**：  
+   如果 top results 大量来自论文站点（arXiv、ACL、ACM、Semantic Scholar 等），
+   说明任务可能偏学术；如果来自 GitHub/npm/PyPI，说明偏代码。
 
-# IT / 代码：默认结果不足或用户明确要 repo/package 时升级
-ask-search "fastapi middleware" -e github,pypi
+3. **按领域升级引擎**（如果需要）：
+   - 学术 metadata（作者、年份、引用）：`-e google_scholar,semantic_scholar,openalex`
+   - 代码 / 包管理：`-e github,npm,pypi`
+   - 社区经验 / 踩坑 / 对比：`-e reddit,hackernews`
+   - 新闻 / 政策 / 发布：`-c news`
 
-# 新闻
-ask-search "AI regulation" -c news
+4. **进一步定点**（如果领域引擎仍不够明确）：
+   - 已知来源：`ask-search "query" -e arxiv`
+   - 已知域名：`ask-search "query site:arxiv.org"`
+   - 已知 repo / package：`-e github` / `-e npm`
 
-# 社区讨论
-ask-search "k8s ingress" -e reddit,hackernews
-```
+### 一些可能有用的观察
 
-要点：
-- `-e` 是升级/约束参数，不是默认入口。
-- 学术搜索第一跳也优先默认 Google；Google 通常能发现 arXiv、ACL、ACM、OpenReview、Semantic Scholar 和项目页。
-- 默认学术升级用 `-e google_scholar,semantic_scholar,openalex`。
-- 不要把 `arxiv` 放进默认学术组合（有限流）；需要 arXiv 时优先用 `site:arxiv.org`，或在明确需要时单独 `-e arxiv`。
-- `site:` 限定域名可以在任何引擎上用。
+- `-e` 改变的是搜索路径，不只是过滤默认结果。
+- 如果默认结果已经有足够的领域来源，通常不需要再切引擎。
+- arxiv 有时比较慢或容易 timeout；如果不需要 arXiv 作为明确来源，
+  默认搜索或其它学术引擎往往就够了。
+- `site:arxiv.org` 可以直接在任何引擎上限定域名。
 - Google 时间语法：`after:2025`、`before:2024`、`2024..2025`。
 
 ## 3. 读取页面
@@ -75,8 +80,9 @@ done
 目标：[描述要调研什么]
 
 步骤：
-1. 用 ask-search 默认搜索；只有结果不足或用户明确指定来源时才加 -e
-2. 选 3-5 个最相关的 URL
-3. 用 crwlr crawl -O /tmp/xxx.md 读取页面
-4. 综合分析，给出结论
+1. 用 ask-search 默认搜索，观察结果属于哪个领域
+2. 如需要，按领域或具体来源再搜一次
+3. 选 3-5 个最相关的 URL
+4. 用 crwlr crawl -O /tmp/xxx.md 读取页面
+5. 综合分析，给出结论
 ```
