@@ -25,5 +25,8 @@ backend/chrome-profile/
 backend/bench/results/
 /tmp/probe.json
 
+# Skill eval workspace
+ask-search-workspace/
+
 # Docker compose override
 backend/docker-compose.override.yml
