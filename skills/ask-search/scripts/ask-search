@@ -32,7 +32,7 @@ if sys.platform == "win32":
     except AttributeError:
         pass
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 # --- Tavily support (opt-in via SEARCH_PROVIDER=tavily + TAVILY_API_KEY) ---
 
