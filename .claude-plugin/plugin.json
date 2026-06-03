@@ -1,7 +1,7 @@
 {
   "name": "web-kit",
   "description": "Lightweight web search + scraping + download: SearxNG metasearch, fallback Chrome fetch, CDP file download.",
-  "version": "1.6.1",
+  "version": "1.7.0",
   "author": {
     "name": "huangyrcn"
   },
