@@ -1,22 +1,23 @@
 # SearxNG 引擎列表
 
-默认使用 Google。先直接运行 `ask-search "query"`；只有用户明确指定来源/引擎，或默认结果质量不足时，才用 `-e` 切换或升级引擎。
+ask-search 支持以下引擎，默认是 Google。
 
 ```bash
 ask-search "query"                                      # 默认 Google
-ask-search "query" -e google_scholar,semantic_scholar,openalex  # 学术升级（默认结果不足时）
-ask-search "query" -e arxiv                             # 明确需要 arXiv 时
+ask-search "query" -e google_scholar,semantic_scholar,openalex  # 学术引擎组合
+ask-search "query" -e arxiv                             # arXiv 单独使用
 ```
 
-## 通用搜索
+## 通用
 
 google, bing, duckduckgo
 
 ## 学术
 
-默认先用 Google。升级时优先：google_scholar, semantic_scholar, openalex, dblp, pubmed。
+google_scholar, semantic_scholar, openalex, dblp, pubmed, arxiv
 
-arxiv 有限流风险，不放进默认学术升级组合；仅在用户明确要求 arXiv、已有 arXiv ID/题名、或需要验证 arXiv 来源时使用。
+- `google_scholar`, `semantic_scholar`, `openalex` 常用于学术 metadata（作者、年份、引用、 venue）。
+- `arxiv` 有时会较慢或 timeout，如果不需要 arXiv 作为明确来源，其它学术引擎或默认搜索通常足够。
 
 ## 代码 / 包管理
 
