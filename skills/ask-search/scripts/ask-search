@@ -9,14 +9,12 @@ ask-search v1.1.0 — Cross-environment SearxNG search skill
 Works in: OpenClaw (CLI) | Claude Code (CLI) | Antigravity (MCP)
 
 Usage:
-  ask-search "query"                    # top 10 results (default: google)
+  ask-search "query"                    # top 10 results (default: Google)
   ask-search "query" --num 5            # limit results
   ask-search "AI news" --categories news
   ask-search "query" --lang zh-CN
-  ask-search "query" -e arxiv,openalex  # specific engines
-  ask-search "query" -e openalex,github # cheap engines (no Chrome)
+  ask-search "query" -e google_scholar,semantic_scholar,openalex  # academic escalation
   ask-search "query" --urls-only        # URL list only (pipe to web_fetch)
-  ask-search "query" --json             # raw JSON output
 
 Environment:
   SEARXNG_URL   SearxNG endpoint (default: http://localhost:8082)
@@ -221,7 +219,7 @@ def main():
     p.add_argument("--categories", "-c", help="general,news,images,science,it,videos,social,files")
     p.add_argument("--timeout",    "-t", type=int, default=30,
                                           help="request timeout in seconds (default: 30)")
-    p.add_argument("--json",       "-j", action="store_true")
+    p.add_argument("--json",       "-j", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--urls-only",  "-u", action="store_true")
     p.add_argument("--version",    "-V", action="version", version=f"ask-search {VERSION}")
     args = p.parse_args()
