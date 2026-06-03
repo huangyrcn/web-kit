@@ -1,10 +1,17 @@
 ---
 name: ask-search
 description: >
-  Web search skill backed by SearxNG. Supports 20+ engines grouped into
-  general, academic, code, community, and book categories. Default is Google.
-  Returns concise human-readable results; errors are JSON regardless of output
-  format.
+  Use this skill whenever the user asks you to search the web, find
+  information online, look something up, or answer a question that needs
+  up-to-date or external knowledge. This covers looking up facts or
+  background info, searching for academic papers or citations, finding repos
+  or packages, checking for recent news or blog posts, and gathering
+  community discussions or comparisons. Trigger keywords include "search,"
+  "look up," "find," "查," "搜," "找," "有没有," and similar. Supports 20+
+  engines (Google, Google Scholar, Semantic Scholar, arXiv, GitHub, Reddit,
+  etc.) with automatic category selection. Do not use for reading local
+  files, grepping the codebase, or answering questions purely from code
+  context.
 argument-hint: 'ask-search "query" [-n count] [-e engine(s)] [-l lang] [-c category] [-t timeout]'
 allowed-tools: Bash
 ---
