@@ -1,0 +1,34 @@
+{
+	admin off
+	auto_https off
+}
+
+# Port A — SearxNG (HTTP, X-API-Key header)
+:8082 {
+	@authed header X-API-Key "{$WEB_KIT_API_KEY}"
+	handle @authed {
+		reverse_proxy localhost:8080
+	}
+	handle {
+		respond "unauthorized" 401
+	}
+}
+
+# Port B — Chrome CDP (WebSocket + HTTP, X-API-Key header)
+:9223 {
+	@authed header X-API-Key "{$WEB_KIT_API_KEY}"
+	handle @authed {
+		reverse_proxy localhost:9224
+	}
+	handle {
+		respond "unauthorized" 401
+	}
+}
+
+# Port C — noVNC (browser, HTTP Basic Auth, password = same key)
+:6080 {
+	basic_auth {
+		webkit {$WEB_KIT_NOVNC_HASH}
+	}
+	reverse_proxy localhost:6081
+}
