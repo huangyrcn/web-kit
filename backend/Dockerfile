@@ -19,6 +19,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
        > /etc/apt/sources.list.d/google-chrome.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends google-chrome-stable \
+    && curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+       | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main" \
+       > /etc/apt/sources.list.d/caddy-stable.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends caddy \
     && rm -rf /var/lib/apt/lists/*
 
 # search-proxy deps — patchright is a drop-in for Playwright with anti-detection
@@ -49,11 +55,13 @@ RUN mkdir -p /etc/searxng-default \
 # App code
 WORKDIR /app
 COPY server.py /app/server.py
-COPY start-xvfb.sh start-chrome.sh start-searxng.sh start-vnc.sh watchdog.sh healthcheck.sh /usr/local/bin/
+COPY Caddyfile /etc/caddy/Caddyfile
+COPY start-xvfb.sh start-chrome.sh start-searxng.sh start-vnc.sh start-caddy.sh watchdog.sh healthcheck.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/start-xvfb.sh \
              /usr/local/bin/start-chrome.sh \
              /usr/local/bin/start-searxng.sh \
              /usr/local/bin/start-vnc.sh \
+             /usr/local/bin/start-caddy.sh \
              /usr/local/bin/watchdog.sh \
              /usr/local/bin/healthcheck.sh
 
