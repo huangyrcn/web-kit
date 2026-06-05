@@ -69,15 +69,41 @@ def make_parser():
 
 
 async def run_crawl(args):
-    from crawl4ai import (
-        AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode,
-    )
-
+    # --- fail-closed checks BEFORE importing crawl4ai (heavy dep) ---
     cdp_url = os.environ.get("CDP_URL") or os.environ.get("CLAUDE_PLUGIN_OPTION_CDP_URL")
     if not cdp_url:
         print("crwlr: CDP_URL environment variable or plugin config is required", file=sys.stderr)
         print("  export CDP_URL=http://your-cdp-host:9223", file=sys.stderr)
         sys.exit(1)
+
+    api_key = os.environ.get("WEB_KIT_API_KEY") or os.environ.get("CLAUDE_PLUGIN_OPTION_WEB_KIT_API_KEY")
+    if not api_key:
+        print("crwlr: WEB_KIT_API_KEY not set — required to reach the web-kit gateway", file=sys.stderr)
+        sys.exit(1)
+
+    # crawl4ai calls connect_over_cdp without headers; patch it to inject our
+    # gateway key on the CDP connection (both playwright and patchright variants).
+    from playwright.async_api import BrowserType as _PWBrowserType
+    _orig_cdp = _PWBrowserType.connect_over_cdp
+    async def _cdp_with_key(self, endpoint_url, **kw):
+        headers = {**(kw.pop("headers", None) or {}), "X-API-Key": api_key}
+        return await _orig_cdp(self, endpoint_url, headers=headers, **kw)
+    _PWBrowserType.connect_over_cdp = _cdp_with_key
+
+    try:
+        from patchright.async_api import BrowserType as _PRBrowserType
+        _orig_pr = _PRBrowserType.connect_over_cdp
+        async def _pr_cdp_with_key(self, endpoint_url, **kw):
+            headers = {**(kw.pop("headers", None) or {}), "X-API-Key": api_key}
+            return await _orig_pr(self, endpoint_url, headers=headers, **kw)
+        _PRBrowserType.connect_over_cdp = _pr_cdp_with_key
+    except ImportError:
+        pass
+
+    # --- now import crawl4ai (requires chromium playwright to be installed) ---
+    from crawl4ai import (
+        AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode,
+    )
 
     browser_config = BrowserConfig(
         browser_type="chromium",
