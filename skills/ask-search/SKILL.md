@@ -48,11 +48,33 @@ available to adjust the search scope or output:
 | `-c` | Category | `-c news` |
 | `-t` | Request timeout in seconds | `-t 60` |
 | `-u` | Output URLs only | `-u` |
+| `-j` | Output JSON (structured, for scripting) | `-j` |
 
-## Tools used
+## How to invoke
 
-- `ask-search` CLI (the script bundled with this skill)
-- `SEARXNG_URL` backend (default: `http://localhost:8082`)
+The script is bundled with this skill. Always invoke it via the script path
+so it works regardless of whether `ask-search` is on the user's PATH:
+
+```bash
+uv run --script ${SKILL_DIR}/scripts/ask-search "query"
+uv run --script ${SKILL_DIR}/scripts/ask-search "query" -n 5
+uv run --script ${SKILL_DIR}/scripts/ask-search "query" -e google_scholar,semantic_scholar
+uv run --script ${SKILL_DIR}/scripts/ask-search "query" -c news -l zh-CN
+```
+
+On Unix with execute permission set, the shebang allows direct invocation:
+```bash
+${SKILL_DIR}/scripts/ask-search "query" -n 5
+```
+
+The only external dependency is `uv` (auto-installs inline Python deps on
+first run) and a running SearxNG backend.
+
+## Environment
+
+`SEARXNG_URL` — SearxNG endpoint (default: `http://localhost:8082`)
+
+`WEB_KIT_API_KEY` — required; sent as the `X-API-Key` header to authenticate to the gateway.
 
 ## Default behavior
 
@@ -175,7 +197,3 @@ Depending on how you invoke the skill, you may get:
   https://...
   ```
 - **JSON** (mainly for scripting or structured parsing; errors are always JSON)
-
-## Environment
-
-`SEARXNG_URL` — SearxNG endpoint (default: `http://localhost:8082`)

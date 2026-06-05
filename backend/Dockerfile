@@ -67,7 +67,7 @@ RUN chmod +x /usr/local/bin/start-xvfb.sh \
 
 COPY supervisord.conf /etc/supervisor/supervisord.conf
 
-EXPOSE 8080 9223 6080
+EXPOSE 8082 9223 6080
 VOLUME /data/chrome-profile
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \

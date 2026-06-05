@@ -12,6 +12,7 @@ fi
 
 # Case 2: key set -> must reach the exec point (dry-run prints marker)
 export WEB_KIT_API_KEY="testkey123"
+export WEB_KIT_NOVNC_HASH="dummyhash"
 out="$(CADDY_DRYRUN=1 bash "$SCRIPT" 2>&1)"
 echo "$out" | grep -q "DRYRUN-would-exec-caddy" || { echo "FAIL: did not reach exec"; exit 1; }
 echo "PASS: fail-closed behavior correct"

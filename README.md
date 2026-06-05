@@ -74,6 +74,7 @@ the per-platform skill loading mechanism.
 |---|---|---|
 | `SEARXNG_URL` | `ask-search` | `http://localhost:8082` |
 | `CDP_URL` | `crwlr`, `cdp-download` | `http://localhost:9223` |
+| `WEB_KIT_API_KEY` | all three skills + gateway | `$(openssl rand -hex 32)` |
 
 If you already have a SearxNG instance and a Chrome with CDP exposed, you can stop here.
 
@@ -112,12 +113,12 @@ $EDITOR searxng-settings/settings.yml      # set secret_key + any API keys
 docker compose up -d                        # first build ~5-10 min for Chrome + SearxNG
 sleep 90                                    # warm-up
 
-curl 'http://localhost:8082/search?q=test&format=json' | jq '.results | length'
-curl http://localhost:9223/json/version | jq .Browser
+curl -H "X-API-Key: $WEB_KIT_API_KEY" 'http://localhost:8082/search?q=test&format=json' | jq '.results | length'
+curl -H "X-API-Key: $WEB_KIT_API_KEY" http://localhost:9223/json/version | jq .Browser
 ```
 
 For first-time Google login (avoids captchas later):
-1. Open `http://localhost:6080/vnc.html`
+1. Open `http://localhost:6080/vnc.html` — the gateway requires HTTP Basic Auth: username `webkit`, password = your `WEB_KIT_API_KEY`
 2. Click **Connect** — you'll see a fluxbox desktop with a Chrome window
 3. Sign in to Google; cookies persist in the Docker volume
 

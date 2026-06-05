@@ -18,3 +18,5 @@ uv run --script ${SKILL_DIR}/scripts/cdp-download <url> output.pdf --interactive
 ```
 
 环境变量：`CDP_URL`（必需），`NOVNC_URL`（可选，默认从 CDP_URL 推导）。
+
+环境变量：`WEB_KIT_API_KEY`（必需，作为 X-API-Key 头发送给网关认证）。

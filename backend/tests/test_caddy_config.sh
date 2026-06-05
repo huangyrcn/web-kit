@@ -5,7 +5,7 @@ command -v docker >/dev/null 2>&1 || { echo "SKIP: docker not available"; exit 0
 docker version >/dev/null 2>&1 || { echo "SKIP: docker daemon not reachable"; exit 0; }
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 export WEB_KIT_API_KEY="testkey123"
-export WEB_KIT_NOVNC_HASH='$2a$14$abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ012345'  # dummy bcrypt for validate
+export WEB_KIT_NOVNC_HASH='$2a$14$Zm9vYmFyYmF6cXV4MTIzNOlO3vYBhX1xqQZ8K7nF5wYpVr9aQK2C'  # dummy bcrypt (53 chars after prefix) for validate
 docker run --rm -e WEB_KIT_API_KEY -e WEB_KIT_NOVNC_HASH \
   -v "$HERE/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2.8 \
   caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile

@@ -8,6 +8,11 @@ if [ -z "${WEB_KIT_API_KEY:-}" ]; then
     exit 1
 fi
 
+if [ -z "${WEB_KIT_NOVNC_HASH:-}" ]; then
+    echo "start-caddy: WEB_KIT_NOVNC_HASH is empty — refusing to start gateway" >&2
+    exit 1
+fi
+
 if [ "${CADDY_DRYRUN:-}" = "1" ]; then
     echo "DRYRUN-would-exec-caddy"
     exit 0
