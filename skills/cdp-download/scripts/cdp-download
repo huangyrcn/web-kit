@@ -50,6 +50,23 @@ def get_cdp_url():
     return url
 
 
+def get_api_key():
+    key = os.environ.get("WEB_KIT_API_KEY") or os.environ.get("CLAUDE_PLUGIN_OPTION_WEB_KIT_API_KEY")
+    if not key:
+        print("Error: WEB_KIT_API_KEY not set — required to reach the web-kit gateway", file=sys.stderr)
+        sys.exit(1)
+    return key
+
+
+def _ws_headers():
+    return ["X-API-Key: " + get_api_key()]
+
+
+def _http_open(url, timeout=10):
+    req = urllib.request.Request(url, headers={"X-API-Key": get_api_key()})
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
 def get_novnc_url():
     """Get noVNC URL, derived from CDP_URL host on port 6080."""
     explicit = os.environ.get("NOVNC_URL")
@@ -65,7 +82,7 @@ def get_page_ws_url(cdp_url):
     """Get WebSocket URL for a page target."""
     targets_url = f"{cdp_url}/json"
     try:
-        targets = json.loads(urllib.request.urlopen(targets_url, timeout=10).read())
+        targets = json.loads(_http_open(targets_url, timeout=10).read())
     except Exception as e:
         raise RuntimeError(f"Failed to connect to CDP at {cdp_url}: {e}")
 
@@ -74,11 +91,11 @@ def get_page_ws_url(cdp_url):
             return t["webSocketDebuggerUrl"]
 
     version_url = f"{cdp_url}/json/version"
-    browser_info = json.loads(urllib.request.urlopen(version_url, timeout=10).read())
+    browser_info = json.loads(_http_open(version_url, timeout=10).read())
     browser_ws = browser_info["webSocketDebuggerUrl"]
 
     # Create a new page target; keep browser ws open to clean up on failure.
-    ws = websocket.create_connection(browser_ws)
+    ws = websocket.create_connection(browser_ws, header=_ws_headers())
     try:
         ws.send(json.dumps({"id": 1, "method": "Target.createTarget", "params": {"url": "about:blank"}}))
         result = json.loads(ws.recv())
@@ -89,7 +106,7 @@ def get_page_ws_url(cdp_url):
         target_id = result["result"]["targetId"]
 
         time.sleep(0.5)
-        targets = json.loads(urllib.request.urlopen(targets_url, timeout=10).read())
+        targets = json.loads(_http_open(targets_url, timeout=10).read())
         for t in targets:
             if t.get("type") == "page":
                 return t["webSocketDebuggerUrl"]
@@ -214,7 +231,7 @@ def _download_via_stream(url, output_path, cdp_url):
     """Strategy 1: Network.loadNetworkResource + IO.read (streaming)."""
     output_path = _resolve_output_path(url, output_path)
     ws_url = get_page_ws_url(cdp_url)
-    ws = websocket.create_connection(ws_url, timeout=120)
+    ws = websocket.create_connection(ws_url, timeout=120, header=_ws_headers())
 
     try:
         result = _ws_send_recv(ws, 1, "Page.getFrameTree")
@@ -366,7 +383,7 @@ def _download_via_navigate(url, output_path, cdp_url, interactive=False):
 
     output_path = _resolve_output_path(url, output_path)
     ws_url = get_page_ws_url(cdp_url)
-    ws = websocket.create_connection(ws_url, timeout=120)
+    ws = websocket.create_connection(ws_url, timeout=120, header=_ws_headers())
 
     try:
         parsed = urllib.parse.urlparse(url)
@@ -490,6 +507,7 @@ def main():
     parser.add_argument("--interactive", "-i", action="store_true",
                         help="Prompt for noVNC reCAPTCHA solving when blocked")
     args = parser.parse_args()
+    get_api_key()  # fail-closed: exit early if key is missing, before any network I/O
 
     try:
         download(args.url, args.output, interactive=args.interactive)
