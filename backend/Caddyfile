@@ -1,6 +1,9 @@
 {
 	admin off
 	auto_https off
+	# SECURITY: WEB_KIT_API_KEY and WEB_KIT_NOVNC_HASH must be non-empty at startup.
+	# An empty WEB_KIT_API_KEY would make the X-API-Key matcher accept header-less
+	# requests (silent-open). start-caddy.sh and docker-compose enforce non-empty.
 }
 
 # Port A — SearxNG (HTTP, X-API-Key header)
