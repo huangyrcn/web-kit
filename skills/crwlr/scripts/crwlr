@@ -100,6 +100,28 @@ async def run_crawl(args):
     except ImportError:
         pass
 
+    # crawl4ai also probes <cdp_url>/json/version with its own aiohttp GET before
+    # connecting — that path bypasses connect_over_cdp, so the gateway 401s it and
+    # crawl4ai aborts with "CDP verification failed". Inject the key on aiohttp
+    # requests too, scoped to the CDP host only (never leak it to third-party sites).
+    try:
+        import aiohttp as _aiohttp
+        from urllib.parse import urlparse as _urlparse
+        _cdp_host = _urlparse(cdp_url).netloc
+        _orig_request = _aiohttp.ClientSession._request
+        def _request_with_key(self, method, str_or_url, **kw):
+            try:
+                if _urlparse(str(str_or_url)).netloc == _cdp_host:
+                    hdrs = dict(kw.get("headers") or {})
+                    hdrs.setdefault("X-API-Key", api_key)
+                    kw["headers"] = hdrs
+            except Exception:
+                pass
+            return _orig_request(self, method, str_or_url, **kw)
+        _aiohttp.ClientSession._request = _request_with_key
+    except ImportError:
+        pass
+
     # --- now import crawl4ai (requires chromium playwright to be installed) ---
     from crawl4ai import (
         AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode,
