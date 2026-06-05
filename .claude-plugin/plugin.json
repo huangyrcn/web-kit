@@ -17,6 +17,12 @@
       "title": "SearxNG endpoint",
       "description": "SearxNG search engine URL (e.g. http://192.168.1.178:8082)",
       "default": "http://localhost:8082"
+    },
+    "web_kit_api_key": {
+      "type": "string",
+      "title": "Gateway API key",
+      "description": "X-API-Key for the web-kit auth gateway; also the noVNC HTTP Basic Auth password (username: webkit). Generate with: openssl rand -hex 32",
+      "default": ""
     }
   }
 }

@@ -83,6 +83,7 @@ Each skill is independent — install only the ones you need. All share the same
 Required env vars (set on the agent host or in `.claude-plugin/plugin.json` userConfig):
 - `SEARXNG_URL` — e.g. `http://localhost:8082`
 - `CDP_URL` — e.g. `http://localhost:9223`
+- `WEB_KIT_API_KEY` — gateway auth key, sent as the `X-API-Key` header (also the noVNC Basic Auth password). Generate with `openssl rand -hex 32`
 
 Backend tuning via env vars or `docker-compose.yml`:
 - `SEARCH_PROXY_CONCURRENCY` (default 3), `FAILURE_CACHE_SECONDS` (default 15s), `PROBE_INTERVAL` (default 300s)
