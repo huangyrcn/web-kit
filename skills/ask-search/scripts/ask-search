@@ -4,7 +4,7 @@
 # dependencies = []
 # ///
 """
-ask-search v1.1.0 — Cross-environment SearxNG search skill
+ask-search v1.3.0 — Cross-environment SearxNG search skill
 
 Works in: OpenClaw (CLI) | Claude Code (CLI) | Antigravity (MCP)
 
@@ -15,6 +15,10 @@ Usage:
   ask-search "query" --lang zh-CN
   ask-search "query" -e google_scholar,semantic_scholar,openalex  # academic escalation
   ask-search "query" --urls-only        # URL list only (pipe to web_fetch)
+
+When a category search (e.g. -c news) returns no results, the script
+automatically falls back to the default Google engine. This works around
+SearxNG's built-in category scrapers failing on non-Latin SERPs.
 
 Environment:
   SEARXNG_URL   SearxNG endpoint (default: http://localhost:8082)
@@ -32,7 +36,7 @@ if sys.platform == "win32":
     except AttributeError:
         pass
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 # --- Tavily support (opt-in via SEARCH_PROVIDER=tavily + TAVILY_API_KEY) ---
 
@@ -262,6 +266,27 @@ def main():
                           "query": args.query}, ensure_ascii=False))
         sys.exit(1)
 
+    # --- Category fallback ---
+    # SearxNG's built-in category scrapers (news, images, etc.) may fail on
+    # non-Latin queries.  When a category search returns nothing, retry with
+    # the default Google engine (backed by Chrome SERP rendering) so the
+    # caller still gets useful results.
+    fallback_note = ""
+    if not results and args.categories and not args.engines:
+        try:
+            fb = search(args.query, args.num, engines=None, lang=args.lang,
+                        categories=None, timeout=args.timeout)
+            if fb["results"]:
+                results = fb["results"]
+                unresponsive = fb["unresponsive_engines"]
+                fallback_note = (
+                    f"[!] Category '{args.categories}' returned 0 results "
+                    f"(SearxNG scrapers may not support this language/region). "
+                    f"Fell back to default Google search.\n\n"
+                )
+        except Exception:
+            pass  # fallback failed silently — report original empty state below
+
     if not results:
         # Empty results — surface unresponsive engines so caller can act
         out = {"error_type": "no_results", "query": args.query}
@@ -275,9 +300,13 @@ def main():
             "query": args.query,
             "results": results,
             "unresponsive_engines": unresponsive,
+            "fallback": bool(fallback_note),
         }, ensure_ascii=False, indent=2))
     else:
-        print(fmt_results(results, args.urls_only, unresponsive))
+        output = fmt_results(results, args.urls_only, unresponsive)
+        if fallback_note:
+            output = fallback_note + output
+        print(output)
 
 if __name__ == "__main__":
     main()
