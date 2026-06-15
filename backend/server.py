@@ -331,7 +331,18 @@ async def search_google(q: str = Query(..., min_length=1), limit: int = Query(10
                 raise
 
         page_content = await page.content()
-        if "unusual traffic" in page_content.lower() or "captcha" in page_content.lower():
+        page_lower = page_content.lower()
+        # Google's normal HTML contains "hasCaptchaSupport" in a script variable —
+        # that is NOT a CAPTCHA.  Real Google CAPTCHA pages have:
+        #   - "unusual traffic" in visible text
+        #   - "/sorry/" in the URL (the actual CAPTCHA interstitial)
+        #   - a g-recaptcha div (the reCAPTCHA challenge widget)
+        is_captcha = (
+            "unusual traffic" in page_lower
+            or "/sorry/" in page.url
+            or "g-recaptcha" in page_lower
+        )
+        if is_captcha:
             logger.error("Google CAPTCHA — log in via VNC (port 6080)")
             _record_failure("google")
             return JSONResponse(
@@ -859,7 +870,14 @@ async def search_google_scholar(q: str = Query(..., min_length=1), limit: int = 
                 raise
 
         page_content = await page.content()
-        if "unusual traffic" in page_content.lower() or "robot" in page_content.lower():
+        page_lower = page_content.lower()
+        # "robot" appears in normal Scholar HTML (e.g. meta robots tags).
+        # Real Scholar CAPTCHA: "unusual traffic" text or g-recaptcha widget.
+        is_captcha = (
+            "unusual traffic" in page_lower
+            or "g-recaptcha" in page_lower
+        )
+        if is_captcha:
             logger.error("Google Scholar CAPTCHA — log in via VNC (port 6080)")
             _record_failure("google_scholar")
             return JSONResponse(
