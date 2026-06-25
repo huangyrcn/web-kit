@@ -3,8 +3,13 @@
 
 Reliability features added on top of the original:
   - _ensure_browser(): per-request CDP reconnect when the underlying browser dies
-  - asyncio.Semaphore(3): bounded concurrency (matches Chrome page-pool size)
-  - in-process failure cache: short-circuits queries that just failed (15s)
+  - asyncio.Semaphore: bounded concurrency (matches Chrome page-pool size)
+  - in-process failure cache: short-circuits queries that just failed
+    (FAILURE_CACHE_SECONDS, default 0 = disabled)
+  - Google-family CAPTCHA retry: /google and /google_scholar retry in-place on
+    CAPTCHA (GOOGLE_CAPTCHA_RETRIES, default 2). Transient CAPTCHAs (datacenter
+    egress) heal within the request. If CAPTCHA persists, 200 + empty results is
+    returned — NOT 429 — so SearxNG never suspends the engine.
 
 Endpoints:
   /google?q=xxx         → Google search
@@ -31,7 +36,17 @@ from patchright.async_api import async_playwright
 CDP_URL = os.environ.get("CDP_URL", "http://localhost:9222")
 PORT = int(os.environ.get("PORT", "3100"))
 MAX_CONCURRENCY = int(os.environ.get("SEARCH_PROXY_CONCURRENCY", "5"))
-FAILURE_CACHE_SECONDS = int(os.environ.get("FAILURE_CACHE_SECONDS", "15"))
+FAILURE_CACHE_SECONDS = int(os.environ.get("FAILURE_CACHE_SECONDS", "0"))
+# CAPTCHA / transient-error retries for Google-family engines (google, google_scholar).
+# Chrome egresses via a datacenter IP where Google intermittently serves a CAPTCHA;
+# retrying in-place heals the transient cases so a single CAPTCHA doesn't fail the
+# whole query (and doesn't poison SearxNG into suspending the engine).
+GOOGLE_CAPTCHA_RETRIES = int(os.environ.get("GOOGLE_CAPTCHA_RETRIES", "2"))
+_CAPTCHA_BACKOFFS = [2, 4]
+
+
+def _backoff_seconds(attempt: int) -> float:
+    return _CAPTCHA_BACKOFFS[min(attempt, len(_CAPTCHA_BACKOFFS) - 1)]
 
 logger = logging.getLogger("search-proxy")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -133,6 +148,88 @@ def _check_failure(key: str) -> float | None:
         _failure_cache.pop(key, None)
         return None
     return remaining
+
+
+class _CaptchaExhausted(Exception):
+    """Raised when a Google-family engine keeps serving CAPTCHA after all retries."""
+
+
+async def _search_with_retry(ctx, url, parse_fn, is_captcha_fn, engine: str, retries: int):
+    """Load `url` in a fresh Chrome page and parse results, retrying on CAPTCHA
+    or transient goto errors.
+
+    - `parse_fn(page) -> list[dict]` extracts results from a loaded page.
+    - `is_captcha_fn(page, content) -> bool` detects a CAPTCHA interstitial.
+
+    On success: closes the page and returns the parsed results.
+    On persistent CAPTCHA: raises `_CaptchaExhausted` (caller returns 200 + empty
+      results — NOT 429 — so SearxNG never suspends the engine).
+    On persistent other errors: re-raises the last exception.
+    Page lifecycle is always cleaned up here; callers must NOT manage the page.
+    """
+    page = None
+    last_err: Exception | None = None
+    try:
+        for attempt in range(retries + 1):
+            if page is not None:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+                page = None
+            try:
+                page = await ctx.new_page()
+                await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            except Exception as e:
+                last_err = e
+                logger.warning("%s: goto failed (attempt %d/%d): %s",
+                               engine, attempt + 1, retries + 1, e)
+                if attempt < retries:
+                    await asyncio.sleep(_backoff_seconds(attempt))
+                    continue
+                raise
+            content = await page.content()
+            if is_captcha_fn(page, content):
+                logger.warning("%s CAPTCHA (attempt %d/%d)",
+                               engine, attempt + 1, retries + 1)
+                if attempt < retries:
+                    await asyncio.sleep(_backoff_seconds(attempt))
+                    continue
+                raise _CaptchaExhausted(
+                    f"{engine} CAPTCHA persisted after {retries + 1} attempts")
+            results = await parse_fn(page)
+            try:
+                await page.close()
+            except Exception:
+                pass
+            page = None
+            return results
+        raise last_err or RuntimeError(f"{engine} search failed")
+    finally:
+        if page is not None:
+            try:
+                await page.close()
+            except Exception:
+                pass
+
+
+def _google_is_captcha(page, content: str) -> bool:
+    """Real Google CAPTCHA: 'unusual traffic' text, /sorry/ URL, or reCAPTCHA widget.
+    Note: normal Google HTML contains 'hasCaptchaSupport' in a script var — that is
+    NOT a CAPTCHA."""
+    cl = content.lower()
+    return (
+        "unusual traffic" in cl
+        or "/sorry/" in page.url
+        or "g-recaptcha" in cl
+    )
+
+
+def _scholar_is_captcha(page, content: str) -> bool:
+    """Scholar CAPTCHA: 'unusual traffic' text or reCAPTCHA widget.
+    'robot' appears in normal Scholar HTML (meta robots tags) — not a CAPTCHA."""
+    cl = content.lower()
+    return "unusual traffic" in cl or "g-recaptcha" in cl
 
 
 @asynccontextmanager
@@ -308,60 +405,28 @@ async def search_google(q: str = Query(..., min_length=1), limit: int = Query(10
     except asyncio.TimeoutError:
         return JSONResponse({"error": "queue timeout", "results": []}, status_code=503)
 
-    page = None
     try:
         ctx = await _get_context(browser)
-        page = await ctx.new_page()
         url = f"https://www.google.com/search?q={quote_plus(q)}&num={limit}&hl=en"
-
-        # Retry once on transient connection errors (e.g. cold-start)
-        _transient = ("ERR_CONNECTION_CLOSED", "ERR_CONNECTION_RESET",
-                      "ERR_CONNECTION_REFUSED", "ERR_NAME_NOT_RESOLVED")
-        for attempt in range(2):
-            try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=20000)
-                break
-            except Exception as e:
-                if attempt == 0 and any(t in str(e) for t in _transient):
-                    logger.warning("Google: transient error on attempt 1, retrying: %s", e)
-                    await page.close()
-                    page = await ctx.new_page()
-                    await asyncio.sleep(2)
-                    continue
-                raise
-
-        page_content = await page.content()
-        page_lower = page_content.lower()
-        # Google's normal HTML contains "hasCaptchaSupport" in a script variable —
-        # that is NOT a CAPTCHA.  Real Google CAPTCHA pages have:
-        #   - "unusual traffic" in visible text
-        #   - "/sorry/" in the URL (the actual CAPTCHA interstitial)
-        #   - a g-recaptcha div (the reCAPTCHA challenge widget)
-        is_captcha = (
-            "unusual traffic" in page_lower
-            or "/sorry/" in page.url
-            or "g-recaptcha" in page_lower
-        )
-        if is_captcha:
-            logger.error("Google CAPTCHA — log in via VNC (port 6080)")
-            _record_failure("google")
-            return JSONResponse(
-                {"error": "Google CAPTCHA. Log in via VNC to refresh session.", "results": []},
-                status_code=429,
+        try:
+            results = await _search_with_retry(
+                ctx, url,
+                lambda p: _parse_google(p, limit),
+                _google_is_captcha, "google", GOOGLE_CAPTCHA_RETRIES,
             )
-
-        results = await _parse_google(page, limit)
-        return {"query": q, "engine": "google", "results": results}
-    except Exception as e:
-        logger.exception("Google search failed")
-        _record_failure("google")
-        return JSONResponse({"error": str(e), "results": []}, status_code=500)
+            return {"query": q, "engine": "google", "results": results}
+        except _CaptchaExhausted:
+            # Return 200 + empty results — do NOT emit 429. A 429 would make
+            # SearxNG suspend the google engine for 60s; returning empty keeps
+            # the engine live for the next query (HA over visibility).
+            logger.error("Google CAPTCHA persisted — returning empty (no 429 to avoid SearxNG suspension). "
+                         "Refresh session via VNC (port 6080) if this persists.")
+            return {"query": q, "engine": "google", "results": [], "note": "captcha"}
+        except Exception as e:
+            logger.exception("Google search failed")
+            _record_failure("google")
+            return JSONResponse({"error": str(e), "results": []}, status_code=500)
     finally:
-        if page is not None:
-            try:
-                await page.close()
-            except Exception:
-                pass
         _page_sem.release()
 
 
@@ -848,55 +913,25 @@ async def search_google_scholar(q: str = Query(..., min_length=1), limit: int = 
     except asyncio.TimeoutError:
         return JSONResponse({"error": "queue timeout", "results": []}, status_code=503)
 
-    page = None
     try:
         ctx = await _get_context(browser)
-        page = await ctx.new_page()
         url = f"https://scholar.google.com/scholar?q={quote_plus(q)}&hl=en"
-
-        _transient = ("ERR_CONNECTION_CLOSED", "ERR_CONNECTION_RESET",
-                      "ERR_CONNECTION_REFUSED", "ERR_NAME_NOT_RESOLVED")
-        for attempt in range(2):
-            try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=20000)
-                break
-            except Exception as e:
-                if attempt == 0 and any(t in str(e) for t in _transient):
-                    logger.warning("Scholar: transient error on attempt 1, retrying: %s", e)
-                    await page.close()
-                    page = await ctx.new_page()
-                    await asyncio.sleep(2)
-                    continue
-                raise
-
-        page_content = await page.content()
-        page_lower = page_content.lower()
-        # "robot" appears in normal Scholar HTML (e.g. meta robots tags).
-        # Real Scholar CAPTCHA: "unusual traffic" text or g-recaptcha widget.
-        is_captcha = (
-            "unusual traffic" in page_lower
-            or "g-recaptcha" in page_lower
-        )
-        if is_captcha:
-            logger.error("Google Scholar CAPTCHA — log in via VNC (port 6080)")
-            _record_failure("google_scholar")
-            return JSONResponse(
-                {"error": "Google Scholar CAPTCHA. Log in via VNC to refresh session.", "results": []},
-                status_code=429,
+        try:
+            results = await _search_with_retry(
+                ctx, url,
+                lambda p: _parse_scholar(p, limit),
+                _scholar_is_captcha, "google_scholar", GOOGLE_CAPTCHA_RETRIES,
             )
-
-        results = await _parse_scholar(page, limit)
-        return {"query": q, "engine": "google_scholar", "results": results}
-    except Exception as e:
-        logger.exception("Google Scholar search failed")
-        _record_failure("google_scholar")
-        return JSONResponse({"error": str(e), "results": []}, status_code=500)
+            return {"query": q, "engine": "google_scholar", "results": results}
+        except _CaptchaExhausted:
+            logger.error("Google Scholar CAPTCHA persisted — returning empty (no 429 to avoid SearxNG suspension). "
+                         "Refresh session via VNC (port 6080) if this persists.")
+            return {"query": q, "engine": "google_scholar", "results": [], "note": "captcha"}
+        except Exception as e:
+            logger.exception("Google Scholar search failed")
+            _record_failure("google_scholar")
+            return JSONResponse({"error": str(e), "results": []}, status_code=500)
     finally:
-        if page is not None:
-            try:
-                await page.close()
-            except Exception:
-                pass
         _page_sem.release()
 
 
