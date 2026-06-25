@@ -3,16 +3,17 @@
 [简体中文](./README.zh-CN.md)
 
 A skill bundle for AI coding agents (Claude Code, Copilot CLI, etc.) that gives them
-**three lightweight web primitives**: search, page reading, and authenticated download.
-Plus a self-hosted **single-container backend** that powers them all.
+**two lightweight web primitives**: search and browser fetch. Plus a self-hosted
+**single-container backend** that powers them all.
 
 ```
 ┌──────────────────────────┐         ┌──────────────────────────────────┐
 │   skill/  (the AI skill) │  ◄───►  │   backend/  (the server side)    │
 │   ─────────────────────  │         │   ─────────────────────────────  │
-│   ask-search             │         │   SearxNG + Chrome+Playwright    │
-│   crwlr                  │         │   CDP, all in one container,     │
-│   cdp-download           │         │   self-healing in 4 layers       │
+│   searxng-search             │         │   SearxNG + Chrome+Playwright    │
+│   browser-fetch          │         │   CDP, all in one container,     │
+│     ├─ page (→ markdown) │         │   self-healing in 4 layers       │
+│     └─ file (→ raw file) │         │                                  │
 └──────────────────────────┘         └──────────────────────────────────┘
         │                                            ▲
         └─ uses ──── SEARXNG_URL=http://...:8082 ────┤
@@ -27,17 +28,17 @@ You can run them together (this repo's main story) or split:
 
 ## skill/ — the AI skill
 
-Three commands an agent can call:
+Two skills an agent can call. `browser-fetch` exposes two subcommands (`page`, `file`):
 
 | Tool | What it does | When agents use it |
 |---|---|---|
-| `ask-search "<query>"` | SearxNG-aggregated web search, multi-engine | "search for X", "look this up", "找一下…" |
-| `crwlr crawl -o md "<url>"` | Real-browser-rendered page → clean markdown | "read this page", "what does this URL say", "转成 markdown" |
-| `cdp-download <url>` | File download via Chrome DevTools Protocol (uses browser cookies) | When `wget`/`curl` fails on auth-protected URLs |
+| `searxng-search "<query>"` | SearxNG-aggregated web search, multi-engine | "search for X", "look this up", "找一下…" |
+| `browser-fetch page "<url>"` | Real-browser-rendered page → clean markdown | "read this page", "what does this URL say", "转成 markdown" |
+| `browser-fetch file <url>` | File download via Chrome DevTools Protocol (uses browser cookies) | "download this PDF", when `wget`/`curl` fails on auth-protected URLs |
 
 Compared to a vanilla agent's built-in web tools, this skill gives:
 - Real JS rendering (the page the user actually sees, not a server-side stripped version)
-- Persistent login cookies (login once via noVNC, all subsequent crawls are authenticated)
+- Persistent login cookies (login once via noVNC, all subsequent fetches are authenticated)
 - Aggregation across many search engines (Google, DDG, Bing, Brave, plus 13 academic sources)
 - Lightweight CLI surface — no MCP server / no extra runtime
 
@@ -61,8 +62,8 @@ export SEARXNG_URL=http://your-host:8082
 export CDP_URL=http://your-host:9223
 
 # 4. Smoke test
-~/.claude/skills/web-kit/scripts/ask-search "hello world" -n 3
-~/.claude/skills/web-kit/scripts/crwlr crawl -o md "https://example.com"
+~/.claude/skills/web-kit/scripts/searxng-search "hello world" -n 3
+~/.claude/skills/web-kit/scripts/page -o md "https://example.com"
 ```
 
 For Copilot CLI, Gemini CLI, or other platforms, see `skill/SKILL.md` — the doc lists
@@ -72,9 +73,9 @@ the per-platform skill loading mechanism.
 
 | Var | Used by | Example |
 |---|---|---|
-| `SEARXNG_URL` | `ask-search` | `http://localhost:8082` |
-| `CDP_URL` | `crwlr`, `cdp-download` | `http://localhost:9223` |
-| `WEB_KIT_API_KEY` | all three skills + gateway | `$(openssl rand -hex 32)` |
+| `SEARXNG_URL` | `searxng-search` | `http://localhost:8082` |
+| `CDP_URL` | `browser-fetch` (`page`, `file`) | `http://localhost:9223` |
+| `WEB_KIT_API_KEY` | both skills + gateway | `$(openssl rand -hex 32)` |
 
 If you already have a SearxNG instance and a Chrome with CDP exposed, you can stop here.
 
@@ -202,7 +203,7 @@ Limits — the backend will **not** reliably pass:
 - DataDome / PerimeterX / Akamai Bot Manager
 - Any site that requires residential IPs (datacenter IP fingerprinting)
 
-For those, plug the `ask-search` / `crwlr` clients into a SaaS like Bright Data,
+For those, plug the `searxng-search` / `browser-fetch` clients into a SaaS like Bright Data,
 ZenRows, or ScrapFly instead.
 
 Verify yourself:
@@ -247,9 +248,9 @@ python3 backend/bench/speed-test.py -n 8 --target http://localhost:8082
 ├── skill/                       ← the AI skill bundle
 │   ├── SKILL.md
 │   ├── scripts/
-│   │   ├── ask-search
-│   │   ├── crwlr
-│   │   └── cdp-download
+│   │   ├── searxng-search
+│   │   ├── page                 (browser-fetch page → markdown)
+│   │   └── file                 (browser-fetch file → raw download)
 │   └── references/
 │       ├── engines.md
 │       └── workflow.md

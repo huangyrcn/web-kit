@@ -4,7 +4,7 @@
 # dependencies = ["websocket-client>=1.7.0"]
 # ///
 """
-Download files via Chrome DevTools Protocol (CDP).
+browser-fetch file — Download a file via Chrome DevTools Protocol (CDP).
 
 Three strategies (tried in order of priority):
   1. Network.loadNetworkResource + IO.read (streaming, low memory — preferred)
@@ -12,8 +12,8 @@ Three strategies (tried in order of priority):
   3. Interactive: prompts user to solve reCAPTCHA via noVNC, then retries (opt-in)
 
 Usage:
-    cdp-download <url> [output_file]
-    cdp-download <url> [output_file] --interactive
+    browser-fetch file <url> [output_file]
+    browser-fetch file <url> [output_file] --interactive
 
 Environment:
     CDP_URL        - Chrome DevTools Protocol endpoint (required, e.g. http://localhost:9223)
@@ -76,6 +76,47 @@ def get_novnc_url():
     parsed = urllib.parse.urlparse(cdp)
     host = parsed.hostname or "localhost"
     return f"http://{host}:6080"
+
+
+def probe_cdp(cdp_url):
+    """Pre-flight check: verify CDP endpoint is reachable and API key accepted."""
+    try:
+        req = urllib.request.Request(
+            f"{cdp_url}/json/version",
+            headers={"X-API-Key": get_api_key()},
+        )
+        urllib.request.urlopen(req, timeout=10)
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            print(json.dumps({
+                "error_type": "unauthorized",
+                "cdp_url": cdp_url,
+                "message": "Gateway rejected the API key (HTTP 401)",
+                "hint": "Check WEB_KIT_API_KEY matches the server.",
+            }), file=sys.stderr)
+            sys.exit(1)
+        # Other HTTP errors — CDP is there but unhealthy; let the actual download try
+    except urllib.error.URLError as e:
+        reason = e.reason
+        err = {"cdp_url": cdp_url}
+        if isinstance(reason, ConnectionRefusedError):
+            err.update(error_type="cdp_unreachable",
+                       message="Connection refused",
+                       hint="CDP endpoint is not listening. Check that the Docker container is running and port 9223 is exposed.")
+        else:
+            err.update(error_type="cdp_unreachable",
+                       message=str(reason),
+                       hint=f"Cannot reach CDP at {cdp_url}. Check the URL and network.")
+        print(json.dumps(err), file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(json.dumps({
+            "error_type": "cdp_unreachable",
+            "cdp_url": cdp_url,
+            "message": str(e),
+            "hint": f"Cannot reach CDP at {cdp_url}. Check the URL and network.",
+        }), file=sys.stderr)
+        sys.exit(1)
 
 
 def get_page_ws_url(cdp_url):
@@ -501,13 +542,14 @@ def download(url, output_path=None, cdp_url=None, interactive=False):
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Download files via Chrome DevTools Protocol")
+    parser = argparse.ArgumentParser(prog="browser-fetch file", description="Download a file via Chrome DevTools Protocol")
     parser.add_argument("url", help="URL to download")
     parser.add_argument("output", nargs="?", help="Output file path")
     parser.add_argument("--interactive", "-i", action="store_true",
                         help="Prompt for noVNC reCAPTCHA solving when blocked")
     args = parser.parse_args()
     get_api_key()  # fail-closed: exit early if key is missing, before any network I/O
+    probe_cdp(get_cdp_url())  # verify CDP reachable before attempting download
 
     try:
         download(args.url, args.output, interactive=args.interactive)

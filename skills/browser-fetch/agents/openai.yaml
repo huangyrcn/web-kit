@@ -1,0 +1,4 @@
+interface:
+  display_name: "Browser Fetch"
+  short_description: "Fetch pages/files via a real Chrome browser"
+  default_prompt: "Use $browser-fetch to read a JS-rendered or blocked page, or download a file."

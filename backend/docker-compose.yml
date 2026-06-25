@@ -14,8 +14,8 @@ services:
     # WEB_KIT_BIND=0.0.0.0 in .env (and set WEB_KIT_VNC_PASSWORD as well —
     # supervisord uses x11vnc -nopw when it's empty).
     ports:
-      - "${WEB_KIT_BIND:-127.0.0.1}:8082:8082"   # SearxNG via Caddy  (web-kit ask-search)
-      - "${WEB_KIT_BIND:-127.0.0.1}:9223:9223"   # Chrome CDP (web-kit crwlr / cdp-download)
+      - "${WEB_KIT_BIND:-127.0.0.1}:8082:8082"   # SearxNG via Caddy  (web-kit searxng-search)
+      - "${WEB_KIT_BIND:-127.0.0.1}:9223:9223"   # Chrome CDP (web-kit browser-fetch)
       - "${WEB_KIT_BIND:-127.0.0.1}:6080:6080"   # noVNC (manual cookie login)
     environment:
       WEB_KIT_VNC_PASSWORD: ${WEB_KIT_VNC_PASSWORD:-}

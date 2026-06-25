@@ -4,17 +4,17 @@
 # dependencies = []
 # ///
 """
-ask-search v1.3.0 — Cross-environment SearxNG search skill
+searxng-search v2.0.0 — Cross-environment SearxNG search skill
 
 Works in: OpenClaw (CLI) | Claude Code (CLI) | Antigravity (MCP)
 
 Usage:
-  ask-search "query"                    # top 10 results (default: Google)
-  ask-search "query" --num 5            # limit results
-  ask-search "AI news" --categories news
-  ask-search "query" --lang zh-CN
-  ask-search "query" -e google_scholar,semantic_scholar,openalex  # academic escalation
-  ask-search "query" --urls-only        # URL list only (pipe to web_fetch)
+  searxng-search "query"                    # top 10 results (default: Google)
+  searxng-search "query" --num 5            # limit results
+  searxng-search "AI news" --categories news
+  searxng-search "query" --lang zh-CN
+  searxng-search "query" -e google_scholar,semantic_scholar,openalex  # academic escalation
+  searxng-search "query" --urls-only        # URL list only (pipe to browser-fetch)
 
 When a category search (e.g. -c news) returns no results, the script
 automatically falls back to the default Google engine. This works around
@@ -36,7 +36,7 @@ if sys.platform == "win32":
     except AttributeError:
         pass
 
-VERSION = "1.3.0"
+VERSION = "2.0.0"
 
 # --- Tavily support (opt-in via SEARCH_PROVIDER=tavily + TAVILY_API_KEY) ---
 
@@ -239,7 +239,7 @@ def main():
                                           help="request timeout in seconds (default: 30)")
     p.add_argument("--json",       "-j", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--urls-only",  "-u", action="store_true")
-    p.add_argument("--version",    "-V", action="version", version=f"ask-search {VERSION}")
+    p.add_argument("--version",    "-V", action="version", version=f"searxng-search {VERSION}")
     args = p.parse_args()
 
     try:

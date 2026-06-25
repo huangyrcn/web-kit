@@ -4,9 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-web-kit is a Claude Code skill plugin that gives AI agents three lightweight web primitives:
-search (ask-search), fallback web fetch via Chrome (crwlr), and authenticated download (cdp-download).
-A self-hosted single-container backend (Docker) powers all three.
+web-kit is a Claude Code skill plugin that gives AI agents two lightweight web primitives:
+search (searxng-search) and browser fetch (browser-fetch, with `page` → markdown and
+`file` → raw download subcommands). A self-hosted single-container backend (Docker)
+powers both.
 
 ## Architecture
 
@@ -14,9 +15,8 @@ The repo has two independent halves connected only by environment variables:
 
 ```
 skills/
-├── ask-search/   (SearxNG metasearch CLI)     ─┐
-├── crwlr/        (fallback Chrome fetcher)       ├── three independent skills
-└── cdp-download/ (CDP file downloader)        ─┘
+├── searxng-search/      (SearxNG metasearch CLI)         ─┐
+└── browser-fetch/   (Chrome fetcher: page + file)    ─┘
        ↓ SEARXNG_URL, CDP_URL
 backend/          (Docker: SearxNG + Chrome + search-proxy)
 ```
@@ -30,9 +30,9 @@ The search-proxy (`backend/server.py`) renders Google/DuckDuckGo SERPs via Chrom
 
 | Skill | Script | Invocation | Key dependency |
 |-------|--------|------------|----------------|
-| `ask-search` | `scripts/ask-search` | `uv run --script` | `urllib.request` (stdlib) |
-| `crwlr` | `scripts/crwlr` | `uv run --script` | `crawl4ai` (auto-installed by uv) |
-| `cdp-download` | `scripts/cdp-download` | `uv run --script` | `websocket-client` (auto-installed by uv) |
+| `searxng-search` | `scripts/searxng-search` | `uv run --script` | `urllib.request` (stdlib) |
+| `browser-fetch` (page) | `scripts/page` | `uv run --script` | `crawl4ai` (auto-installed by uv) |
+| `browser-fetch` (file) | `scripts/file` | `uv run --script` | `websocket-client` (auto-installed by uv) |
 
 All scripts use PEP 723 inline metadata with `#!/usr/bin/env -S uv run --script` shebangs.
 On Unix they can be executed directly; on Windows use `uv run --script <path>`.
@@ -63,12 +63,12 @@ No curl, no pip install, no manual setup beyond having `uv` in PATH.
 
 ```bash
 # Cross-platform invocation (works on Windows/macOS/Linux):
-uv run --script skills/ask-search/scripts/ask-search "query"
-uv run --script skills/crwlr/scripts/crwlr crawl -O page.md "https://example.com"
-uv run --script skills/cdp-download/scripts/cdp-download https://example.com/file.pdf
+uv run --script skills/searxng-search/scripts/searxng-search "query"
+uv run --script skills/browser-fetch/scripts/page -O page.md "https://example.com"
+uv run --script skills/browser-fetch/scripts/file https://example.com/file.pdf
 ```
 
-Each skill is independent — install only the ones you need. All share the same backend env vars.
+Both skills are independent — install only the ones you need. All share the same backend env vars.
 
 ## Key Design Decisions
 

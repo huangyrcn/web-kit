@@ -4,18 +4,17 @@
 # dependencies = ["crawl4ai>=0.7.0"]
 # ///
 """
-crwlr — Fallback web fetcher using a real Chrome browser via CDP.
+browser-fetch page — Render a web page to markdown via a real Chrome browser (CDP).
 
-Use when curl/wget/WebFetch are blocked by anti-scraping, return incomplete
-content, or can't render JS-heavy pages. Connects to a remote Chrome instance
-and converts pages to clean markdown.
+Fetches a URL through a remote Chrome instance, executes JS, and converts the
+rendered page to clean markdown. Handles anti-scraping and JS-heavy SPAs.
 
 Usage:
-  crwlr crawl -O out.md "https://example.com"          # Fetch and save (recommended)
-  crwlr crawl -o md "https://example.com"               # Output to stdout
-  crwlr crawl --deep-crawl bfs --max-depth 20 -O out.md "https://..."  # Deep crawl
-  crwlr crawl -bc -O out.md "https://example.com"       # Bypass cache
-  crwlr --raw crawl -o md "https://..."                 # Use local browser
+  browser-fetch page -O out.md "https://example.com"          # Fetch and save (recommended)
+  browser-fetch page -o md "https://example.com"               # Output to stdout
+  browser-fetch page --deep-crawl bfs --max-depth 20 -O out.md "https://..."  # Deep crawl
+  browser-fetch page -bc -O out.md "https://example.com"       # Bypass cache
+  browser-fetch page --raw -o md "https://..."                 # Use local browser
 
 Environment:
   CDP_URL          Chrome DevTools Protocol endpoint (required, e.g. http://localhost:9223)
@@ -42,29 +41,26 @@ if sys.platform == "win32":
 
 def make_parser():
     p = argparse.ArgumentParser(
-        prog="crwlr",
+        prog="browser-fetch page",
         description="Web page fetcher using a real Chrome browser via CDP",
     )
     p.add_argument("--raw", action="store_true",
                    help="Call crwl directly (local browser, skip CDP config)")
-    sub = p.add_subparsers(dest="command")
-
-    crawl = sub.add_parser("crawl", help="Crawl a URL")
-    crawl.add_argument("url", help="URL to crawl")
-    crawl.add_argument("-o", "--output", default="md",
-                       choices=["md", "md-fit", "json", "all"],
-                       help="Output format (default: md)")
-    crawl.add_argument("-O", "--save-to", dest="save_to",
-                       help="Save output to file (recommended)")
-    crawl.add_argument("--deep-crawl", dest="deep_crawl",
-                       choices=["bfs", "dfs"],
-                       help="Deep crawl strategy")
-    crawl.add_argument("--max-depth", dest="max_depth", type=int, default=10,
-                       help="Max link-hop depth for deep crawl (default: 10)")
-    crawl.add_argument("-bc", "--bypass-cache", dest="bypass_cache",
-                       action="store_true", help="Bypass cache")
-    crawl.add_argument("--raw-crawl", dest="raw_crawl", action="store_true",
-                       help=argparse.SUPPRESS)
+    p.add_argument("url", help="URL to crawl")
+    p.add_argument("-o", "--output", default="md",
+                   choices=["md", "md-fit", "json", "all"],
+                   help="Output format (default: md)")
+    p.add_argument("-O", "--save-to", dest="save_to",
+                   help="Save output to file (recommended)")
+    p.add_argument("--deep-crawl", dest="deep_crawl",
+                   choices=["bfs", "dfs"],
+                   help="Deep crawl strategy")
+    p.add_argument("--max-depth", dest="max_depth", type=int, default=10,
+                   help="Max link-hop depth for deep crawl (default: 10)")
+    p.add_argument("-bc", "--bypass-cache", dest="bypass_cache",
+                   action="store_true", help="Bypass cache")
+    p.add_argument("--raw-crawl", dest="raw_crawl", action="store_true",
+                   help=argparse.SUPPRESS)
     return p
 
 
@@ -72,13 +68,13 @@ async def run_crawl(args):
     # --- fail-closed checks BEFORE importing crawl4ai (heavy dep) ---
     cdp_url = os.environ.get("CDP_URL") or os.environ.get("CLAUDE_PLUGIN_OPTION_CDP_URL")
     if not cdp_url:
-        print("crwlr: CDP_URL environment variable or plugin config is required", file=sys.stderr)
+        print("browser-fetch page: CDP_URL environment variable or plugin config is required", file=sys.stderr)
         print("  export CDP_URL=http://your-cdp-host:9223", file=sys.stderr)
         sys.exit(1)
 
     api_key = os.environ.get("WEB_KIT_API_KEY") or os.environ.get("CLAUDE_PLUGIN_OPTION_WEB_KIT_API_KEY")
     if not api_key:
-        print("crwlr: WEB_KIT_API_KEY not set — required to reach the web-kit gateway", file=sys.stderr)
+        print("browser-fetch page: WEB_KIT_API_KEY not set — required to reach the web-kit gateway", file=sys.stderr)
         sys.exit(1)
 
     # crawl4ai calls connect_over_cdp without headers; patch it to inject our
@@ -99,6 +95,52 @@ async def run_crawl(args):
         _PRBrowserType.connect_over_cdp = _pr_cdp_with_key
     except ImportError:
         pass
+
+    # Pre-flight: verify CDP endpoint is reachable and the API key is accepted
+    # before importing crawl4ai (heavy dep). This gives a structured error instead
+    # of crawl4ai's raw "CDP endpoint not ready" exception.
+    try:
+        import urllib.request as _ureq
+        _probe_req = _ureq.Request(
+            f"{cdp_url}/json/version",
+            headers={"X-API-Key": api_key},
+        )
+        _ureq.urlopen(_probe_req, timeout=10)
+    except _ureq.HTTPError as _e:
+        if _e.code == 401:
+            print(json.dumps({
+                "error_type": "unauthorized",
+                "cdp_url": cdp_url,
+                "message": "Gateway rejected the API key (HTTP 401)",
+                "hint": "Check WEB_KIT_API_KEY matches the server.",
+            }), file=sys.stderr)
+            sys.exit(1)
+        # Other HTTP errors (5xx etc) — CDP is there but unhealthy; let crawl4ai try
+    except _ureq.URLError as _e:
+        _reason = _e.reason
+        _err = {"cdp_url": cdp_url}
+        if isinstance(_reason, ConnectionRefusedError):
+            _err.update(error_type="cdp_unreachable",
+                        message="Connection refused",
+                        hint="CDP endpoint is not listening. Check that the Docker container is running and port 9223 is exposed.")
+        elif isinstance(_reason, (type(None),)):
+            _err.update(error_type="cdp_unreachable",
+                        message=str(_e),
+                        hint=f"Cannot reach CDP at {cdp_url}. Check the URL and network.")
+        else:
+            _err.update(error_type="cdp_unreachable",
+                        message=str(_reason),
+                        hint=f"Cannot reach CDP at {cdp_url}. Check the URL and network.")
+        print(json.dumps(_err), file=sys.stderr)
+        sys.exit(1)
+    except Exception as _e:
+        print(json.dumps({
+            "error_type": "cdp_unreachable",
+            "cdp_url": cdp_url,
+            "message": str(_e),
+            "hint": f"Cannot reach CDP at {cdp_url}. Check the URL and network.",
+        }), file=sys.stderr)
+        sys.exit(1)
 
     # crawl4ai also probes <cdp_url>/json/version with its own aiohttp GET before
     # connecting — that path bypasses connect_over_cdp, so the gateway 401s it and
@@ -200,7 +242,7 @@ def run_raw(argv):
         result = subprocess.run([crwl_bin] + argv, check=False)
         sys.exit(result.returncode)
     except FileNotFoundError:
-        print(f"crwlr: {crwl_bin} not found", file=sys.stderr)
+        print(f"browser-fetch page: {crwl_bin} not found", file=sys.stderr)
         sys.exit(1)
 
 
@@ -214,14 +256,6 @@ def main():
 
     parser = make_parser()
     args = parser.parse_args()
-
-    if not args.command:
-        parser.print_help()
-        sys.exit(1)
-
-    if args.command != "crawl":
-        parser.print_help()
-        sys.exit(1)
 
     if sys.platform == "win32":
         # Suppress ResourceWarning from asyncio ProactorEventLoop transport

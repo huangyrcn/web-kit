@@ -1,32 +1,65 @@
-# SearxNG 引擎列表
+# SearxNG engines reference
 
-ask-search 支持以下引擎，默认是 Google。
+searxng-search supports the following engines, default is Google. The group table
+lives in SKILL.md; this file holds per-engine usage notes.
 
 ```bash
-ask-search "query"                                      # 默认 Google
-ask-search "query" -e google_scholar,semantic_scholar,openalex  # 学术引擎组合
-ask-search "query" -e arxiv                             # arXiv 单独使用
+uv run --script ${SKILL_DIR}/scripts/searxng-search "query"                                      # default Google
+uv run --script ${SKILL_DIR}/scripts/searxng-search "query" -e google_scholar,semantic_scholar,openalex  # academic set
+uv run --script ${SKILL_DIR}/scripts/searxng-search "query" -e arxiv                             # arXiv alone
 ```
 
-## 通用
+## General
 
 google, bing, duckduckgo
 
-## 学术
+- Google is the default and indexes the broadest range of sources (papers,
+  repos, blogs, docs, forums). A reasonable first step for almost any query.
+- Bing and DuckDuckGo are useful as alternates when Google rate-limits or
+  returns captcha pages.
+
+## Academic
 
 google_scholar, semantic_scholar, openalex, dblp, pubmed, arxiv
 
-- `google_scholar`, `semantic_scholar`, `openalex` 常用于学术 metadata（作者、年份、引用、 venue）。
-- `arxiv` 有时会较慢或 timeout，如果不需要 arXiv 作为明确来源，其它学术引擎或默认搜索通常足够。
+- `google_scholar`, `semantic_scholar`, `openalex` provide clean academic
+  metadata (authors, year, venue, citations). Best for literature surveys and
+  citation chasing.
+- `dblp` is strong for CS bibliography; `pubmed` for biomedical.
+- `arxiv` can be slower or prone to timeout. If you do not specifically need
+  arXiv as a source, the default or another academic engine is usually enough.
+  To restrict to arXiv content without the slow arxiv engine, use
+  `site:arxiv.org` on the default engine instead.
 
-## 代码 / 包管理
+## Code and packages
 
-github, github_code, gitlab, huggingface, npm, pypi, crates, lib_rs, pkg_go_dev, sourcehut, microsoft_learn, nvd
+github, github_code, gitlab, huggingface, npm, pypi, crates, lib_rs,
+pkg_go_dev, sourcehut, microsoft_learn, nvd
 
-## 社区
+- `github` searches repos; `github_code` searches inside repo code.
+- `npm`, `pypi`, `crates`, `lib_rs`, `pkg_go_dev` point at language package
+  registries — more reliable than the default for "is there a package that…".
+- `huggingface` for models/datasets.
+- `nvd` for CVE / vulnerability lookups.
+- `microsoft_learn` for MS docs (Azure, .NET, etc.).
+
+## Community
 
 hackernews, reddit, wikidata
 
-## 图书
+- `reddit`, `hackernews` for community experience, pitfalls, comparisons,
+  "has anyone tried…".
+- `wikidata` for structured entity data.
+
+## Books and library
 
 annas_archive, zlibrary
+
+- For finding books, textbooks, and papers hosted on shadow libraries.
+
+## Query operators (work on Google and most engines)
+
+- `site:arxiv.org` — restrict to a domain
+- `after:2025`, `before:2024`, `2024..2025` — date ranges
+- `"exact phrase"` — quoted phrase match
+- `-word` — exclude a term
