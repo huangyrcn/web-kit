@@ -7,19 +7,19 @@ description: >
   citations, locating repos/packages/APIs, checking recent news, and gathering
   community discussions or comparisons. Trigger keywords: "search," "look up,"
   "find," "查," "搜," "找," "有没有," and similar. Supports category, language,
-  and engine selection with automatic academic/code/community engine groups.
+  and single-engine selection when the default Google engine is not enough.
   Do not use for local file search (use grep), repo-level search (use gh CLI),
   or in-repo doc search.
 metadata:
-  argument-hint: 'searxng-search "query" [-n count] [-e engine(s)] [-l lang] [-c category] [-t timeout]'
+  argument-hint: 'searxng-search "query" [-n count] [-e engine] [-l lang] [-c category] [-t timeout]'
 allowed-tools: Bash
 ---
 
 # searxng-search
 
-A web search skill that queries a SearxNG backend. Aggregates results across
-20+ engines, defaults to Google. Part of a research workflow: find → read →
-synthesize. Pair with `browser-fetch` to read the pages this skill finds.
+A web search skill that queries a SearxNG backend. It defaults to Google for
+clear, broad web results. Part of a research workflow: find → read → synthesize.
+Pair with `browser-fetch` to read the pages this skill finds.
 
 ## Input
 
@@ -29,7 +29,7 @@ The primary input is a natural language query. Optional flags adjust scope:
 |---|---|---|
 | query | What to search for (required) | `"knowledge graph multi-hop reasoning"` |
 | `-n` | Limit number of results | `-n 5` |
-| `-e` | Specific engine(s), comma-separated | `-e google_scholar,semantic_scholar` |
+| `-e` | Use one specific engine instead of Google | `-e google_scholar` |
 | `-l` | Language preference | `-l zh-CN` |
 | `-c` | Category | `-c news` |
 | `-t` | Request timeout in seconds | `-t 60` |
@@ -44,7 +44,7 @@ so it works regardless of whether `searxng-search` is on the user's PATH:
 ```bash
 uv run --script ${SKILL_DIR}/scripts/searxng-search "query"
 uv run --script ${SKILL_DIR}/scripts/searxng-search "query" -n 5
-uv run --script ${SKILL_DIR}/scripts/searxng-search "query" -e google_scholar,semantic_scholar
+uv run --script ${SKILL_DIR}/scripts/searxng-search "query" -e google_scholar
 uv run --script ${SKILL_DIR}/scripts/searxng-search "query" -c news -l zh-CN
 ```
 
@@ -71,7 +71,8 @@ If you do not specify any flags:
 
 ## Available engines
 
-Engines are grouped by what they index. Most tasks need at most one group.
+Engines are grouped by what they index. Choose at most one non-default engine
+per search. To compare sources, run separate searches.
 
 | Group | Engines |
 |---|---|
@@ -93,11 +94,14 @@ Per-engine usage notes and examples are in `references/engines.md`.
    the right kind of sources (papers, repos, news, forums), you may already
    have what you need.
 
-3. **If results are not from the expected domain, switch to a domain-specific
-   engine set.** For example:
-   - Academic metadata: `-e google_scholar,semantic_scholar,openalex`
-   - Code and packages: `-e github,npm,pypi`
-   - Community experience: `-e reddit,hackernews`
+3. **If results are not from the expected domain, retry with one
+   domain-specific engine.** For example:
+   - Academic metadata: `-e google_scholar`, then a separate search with
+     `-e semantic_scholar` if needed
+   - Code and packages: `-e github`, then a separate search with `-e npm` or
+     `-e pypi` if needed
+   - Community experience: `-e reddit`, then a separate search with
+     `-e hackernews` if needed
    - News and recent events: `-c news`
 
 4. **If results are from the right domain but not specific enough, narrow
@@ -108,7 +112,7 @@ Per-engine usage notes and examples are in `references/engines.md`.
 
 - The default output shows which engine each result came from.
 - If results cluster around a particular domain (papers, repos, docs), that
-  may indicate which domain-specific engine set could be useful next.
+  may indicate which single domain-specific engine could be useful next.
 - If results are already rich and directly relevant, additional searches may
   not add much value.
 - A `site:` filter is useful when you already know the kind of source you
@@ -124,8 +128,10 @@ Per-engine usage notes and examples are in `references/engines.md`.
 - Some engines (notably arxiv) can be slower or more prone to timeout. If you
   do not specifically need arXiv as a source, the default or another academic
   engine is often sufficient.
+- `-e` accepts exactly one engine. Do not pass comma-separated engine lists;
+  mixed-engine results are harder to interpret and compare.
 - `-e` changes which search path is used; it does not just filter the default
-  results.
+  results. Prefer default Google first, then one explicit engine per retry.
 - The default human-readable output is intentionally concise. For structured
   results, `-j` is available (hidden from default help because it produces
   longer output).
@@ -145,8 +151,8 @@ All errors are JSON to stdout (exit code 1):
 | `http_error` | The backend returned an HTTP error | Usually transient |
 | `backend_unreachable` | The SearxNG backend could not be reached | Check `SEARXNG_URL` |
 
-If the command succeeds but some engines failed, the output includes which
-engines did not respond — useful for deciding whether to retry without them.
+If the command succeeds but an engine failed, the output includes which engine
+did not respond — useful for deciding whether to retry with a different engine.
 
 ## Final output
 

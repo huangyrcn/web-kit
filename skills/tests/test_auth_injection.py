@@ -15,6 +15,16 @@ def test_searxng_search_no_key_fails_fast():
     assert r.returncode != 0, f"expected non-zero exit, got 0; stdout={r.stdout}"
     assert "WEB_KIT_API_KEY" in (r.stderr + r.stdout)
 
+
+def test_searxng_search_rejects_multiple_engines_before_network():
+    env = {**os.environ}
+    env["WEB_KIT_API_KEY"] = "testkey"
+    env["SEARXNG_URL"] = "http://127.0.0.1:9"
+    r = run(SEARXNG_SEARCH, ["test query", "-e", "google_scholar,semantic_scholar"], env)
+    assert r.returncode != 0, f"expected non-zero exit, got 0; stdout={r.stdout}"
+    assert "multiple_engines_not_supported" in r.stdout
+    assert "backend_unreachable" not in r.stdout
+
 PAGE = SKILLS / "browser-fetch" / "scripts" / "page"
 
 
@@ -52,6 +62,8 @@ def test_file_no_key_fails_fast():
 if __name__ == "__main__":
     test_searxng_search_no_key_fails_fast()
     print("searxng-search PASS")
+    test_searxng_search_rejects_multiple_engines_before_network()
+    print("searxng-search multiple engines PASS")
     test_page_no_key_fails_fast()
     print("browser-fetch page PASS")
     test_file_no_key_fails_fast()

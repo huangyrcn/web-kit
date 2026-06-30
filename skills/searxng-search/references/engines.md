@@ -1,11 +1,12 @@
 # SearxNG engines reference
 
-searxng-search supports the following engines, default is Google. The group table
-lives in SKILL.md; this file holds per-engine usage notes.
+searxng-search supports the following engines, default is Google. Use at most
+one non-default engine per search; run separate searches to compare engines.
+The group table lives in SKILL.md; this file holds per-engine usage notes.
 
 ```bash
 uv run --script ${SKILL_DIR}/scripts/searxng-search "query"                                      # default Google
-uv run --script ${SKILL_DIR}/scripts/searxng-search "query" -e google_scholar,semantic_scholar,openalex  # academic set
+uv run --script ${SKILL_DIR}/scripts/searxng-search "query" -e google_scholar                    # one academic engine
 uv run --script ${SKILL_DIR}/scripts/searxng-search "query" -e arxiv                             # arXiv alone
 ```
 
@@ -24,7 +25,7 @@ google_scholar, semantic_scholar, openalex, dblp, pubmed, arxiv
 
 - `google_scholar`, `semantic_scholar`, `openalex` provide clean academic
   metadata (authors, year, venue, citations). Best for literature surveys and
-  citation chasing.
+  citation chasing. Run them one at a time when you need to compare coverage.
 - `dblp` is strong for CS bibliography; `pubmed` for biomedical.
 - `arxiv` can be slower or prone to timeout. If you do not specifically need
   arXiv as a source, the default or another academic engine is usually enough.

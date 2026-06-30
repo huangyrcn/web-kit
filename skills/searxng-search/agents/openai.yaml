@@ -1,4 +1,4 @@
 interface:
   display_name: "SearxNG Search"
-  short_description: "Aggregate web search across 20+ engines"
+  short_description: "Google-first web search with optional single-engine fallbacks"
   default_prompt: "Use $searxng-search to find current information, papers, or packages online."

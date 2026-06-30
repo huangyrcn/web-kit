@@ -13,7 +13,7 @@ Usage:
   searxng-search "query" --num 5            # limit results
   searxng-search "AI news" --categories news
   searxng-search "query" --lang zh-CN
-  searxng-search "query" -e google_scholar,semantic_scholar,openalex  # academic escalation
+  searxng-search "query" -e google_scholar  # use one non-default engine
   searxng-search "query" --urls-only        # URL list only (pipe to browser-fetch)
 
 When a category search (e.g. -c news) returns no results, the script
@@ -226,7 +226,8 @@ def main():
     p.add_argument("query")
     p.add_argument("--num",        "-n", type=int, default=10)
     p.add_argument("--engines",    "-e", help=(
-        "Comma-separated engine list: "
+        "Single engine to use instead of the default Google engine. "
+        "Run separate searches to compare engines. Available engines: "
         "google, bing, duckduckgo, arxiv, google_scholar, semantic_scholar, "
         "openalex, dblp, pubmed, github, github_code, gitlab, hackernews, "
         "huggingface, npm, pypi, crates, lib_rs, pkg_go_dev, sourcehut, "
@@ -243,6 +244,14 @@ def main():
     args = p.parse_args()
 
     try:
+        if args.engines and "," in args.engines:
+            raise RuntimeError(json.dumps({
+                "error_type": "multiple_engines_not_supported",
+                "message": "-e accepts exactly one engine. Run separate searches to compare engines.",
+                "hint": "Use the default Google search first; for another source, retry with one engine, e.g. -e google_scholar.",
+                "engines": [engine.strip() for engine in args.engines.split(",") if engine.strip()],
+            }))
+
         provider = _get_search_provider()
         if provider == "tavily":
             results = tavily_search(args.query, args.num)

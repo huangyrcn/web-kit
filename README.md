@@ -32,14 +32,14 @@ Two skills an agent can call. `browser-fetch` exposes two subcommands (`page`, `
 
 | Tool | What it does | When agents use it |
 |---|---|---|
-| `searxng-search "<query>"` | SearxNG-aggregated web search, multi-engine | "search for X", "look this up", "找一下…" |
+| `searxng-search "<query>"` | SearxNG-backed web search, default Google with optional single-engine override | "search for X", "look this up", "找一下…" |
 | `browser-fetch page "<url>"` | Real-browser-rendered page → clean markdown | "read this page", "what does this URL say", "转成 markdown" |
 | `browser-fetch file <url>` | File download via Chrome DevTools Protocol (uses browser cookies) | "download this PDF", when `wget`/`curl` fails on auth-protected URLs |
 
 Compared to a vanilla agent's built-in web tools, this skill gives:
 - Real JS rendering (the page the user actually sees, not a server-side stripped version)
 - Persistent login cookies (login once via noVNC, all subsequent fetches are authenticated)
-- Aggregation across many search engines (Google, DDG, Bing, Brave, plus 13 academic sources)
+- Google-first search with explicit single-engine fallbacks (DDG, Bing, academic sources, code/package engines)
 - Lightweight CLI surface — no MCP server / no extra runtime
 
 ### Install (Claude Code example)

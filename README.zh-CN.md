@@ -32,14 +32,14 @@
 
 | 工具 | 功能 | 代理何时会用 |
 |---|---|---|
-| `searxng-search "<query>"` | 基于 SearxNG 聚合的多引擎搜索 | “搜索 X”、“查一下”、“找一下…” |
+| `searxng-search "<query>"` | 基于 SearxNG 的搜索，默认 Google，可显式切换单个引擎 | “搜索 X”、“查一下”、“找一下…” |
 | `browser-fetch page "<url>"` | 用真实浏览器渲染页面并转为干净 markdown | “读这个页面”、“这个 URL 说了什么”、“转成 markdown” |
 | `browser-fetch file <url>` | 通过 Chrome DevTools Protocol 下载文件（复用浏览器 Cookie） | “下载这个 PDF”、当 `wget`/`curl` 无法下载鉴权资源时 |
 
 相比代理内置的普通 Web 工具，这个 skill 提供：
 - 真实 JS 渲染（看到的是用户实际看到的页面，而不是服务端裁剪版本）
 - 持久登录 Cookie（通过 noVNC 登录一次，后续抓取可持续带鉴权）
-- 多搜索引擎聚合（Google、DDG、Bing、Brave，外加 13 个学术来源）
+- Google 优先搜索，并支持显式单引擎 fallback（DDG、Bing、学术来源、代码/包引擎等）
 - 轻量 CLI 接口（不需要 MCP server / 额外 runtime）
 
 ### 安装（以 Claude Code 为例）
