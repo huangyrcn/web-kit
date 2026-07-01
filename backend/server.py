@@ -15,7 +15,7 @@ Endpoints:
   /google?q=xxx         → Google search
   /ddg?q=xxx            → DuckDuckGo search
   /bing?q=xxx           → Bing search (via Chrome)
-  /arxiv?q=xxx          → arXiv search (direct HTML scrape)
+  /arxiv?q=xxx          → arXiv search (via Chrome CDP)
   /google_scholar?q=xxx → Google Scholar search (via Chrome CDP)
   /semantic_scholar?q=xxx → Semantic Scholar search (via Chrome CDP)
   /open?url=xxx         → Open URL for manual interaction via VNC
@@ -28,9 +28,7 @@ import os
 import re
 import time
 from contextlib import asynccontextmanager
-from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote_plus, urlparse
-from urllib.request import Request, urlopen
 
 from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
@@ -67,7 +65,7 @@ _failure_cache: dict[str, float] = {}
 _manual_page = None
 _manual_page_lock = asyncio.Lock()
 
-# arXiv rate-limits concurrent requests from the same IP.  Serialize access and
+# arXiv rate-limits repeated requests from the same IP.  Serialize access and
 # cache successful responses so repeated research loops do not hammer arxiv.org.
 _arxiv_lock = asyncio.Lock()
 _arxiv_cache: dict[str, tuple[float, list[dict]]] = {}
@@ -650,17 +648,7 @@ async def search_bing(q: str = Query(..., min_length=1), limit: int = Query(10, 
         _page_sem.release()
 
 
-# ─── arXiv (direct HTML scrape) ──────────────────────────────────────────────
-
-def _fetch_text(url: str, timeout: int) -> str:
-    req = Request(url, headers={"User-Agent": "web-kit-search-proxy/1.0"})
-    try:
-        with urlopen(req, timeout=timeout) as resp:
-            return resp.read().decode("utf-8", errors="replace")
-    except HTTPError as e:
-        raise RuntimeError(f"fetch failed: HTTP {e.code}") from e
-    except URLError as e:
-        raise RuntimeError(f"fetch failed: {e}") from e
+# ─── arXiv (via Chrome CDP) ─────────────────────────────────────────────────
 
 
 _ARXIV_RESULT_RE = re.compile(
@@ -764,20 +752,37 @@ async def search_arxiv(q: str = Query(..., min_length=1), limit: int = Query(10,
             status_code=503,
         )
 
-    # Serialize arxiv requests: arxiv.org rate-limits concurrent access from
-    # the same IP, so only one request hits it at a time.
+    # Serialize arxiv requests: arxiv.org rate-limits repeated access from the
+    # same IP, so only one request hits it at a time.
     async with _arxiv_lock:
-        try:
-            cache_key = q.strip().lower()
-            cached = _arxiv_cache.get(cache_key)
-            if cached:
-                expires_at, cached_results = cached
-                if expires_at > time.time():
-                    return {"query": q, "engine": "arxiv", "results": cached_results[:limit], "cache": "hit"}
-                _arxiv_cache.pop(cache_key, None)
+        cache_key = q.strip().lower()
+        cached = _arxiv_cache.get(cache_key)
+        if cached:
+            expires_at, cached_results = cached
+            if expires_at > time.time():
+                return {"query": q, "engine": "arxiv", "results": cached_results[:limit], "cache": "hit"}
+            _arxiv_cache.pop(cache_key, None)
 
+        try:
+            browser = await _ensure_browser()
+        except Exception as e:
+            return JSONResponse({"error": f"chrome unreachable: {e}", "results": []}, status_code=503)
+
+        try:
+            await asyncio.wait_for(_page_sem.acquire(), timeout=30)
+        except asyncio.TimeoutError:
+            return JSONResponse({"error": "queue timeout", "results": []}, status_code=503)
+
+        page = None
+        try:
+            ctx = await _get_context(browser)
+            page = await ctx.new_page()
             url = f"https://arxiv.org/search/?query={quote_plus(q)}&searchtype=all"
-            html = await asyncio.to_thread(_fetch_text, url, 20)
+            response = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            if response is not None and response.status >= 400:
+                raise RuntimeError(f"arxiv returned HTTP {response.status}")
+
+            html = await page.content()
             results = _parse_arxiv_html(html, max(limit, 10))
             if results:
                 _arxiv_cache[cache_key] = (time.time() + ARXIV_CACHE_SECONDS, results)
@@ -787,6 +792,13 @@ async def search_arxiv(q: str = Query(..., min_length=1), limit: int = Query(10,
             logger.exception("arXiv search failed")
             _record_failure("arxiv")
             return JSONResponse({"error": str(e), "results": []}, status_code=500)
+        finally:
+            if page is not None:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+            _page_sem.release()
 
 
 # ─── Google Scholar (via Chrome CDP) ─────────────────────────────────────────
