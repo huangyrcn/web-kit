@@ -38,6 +38,96 @@ if sys.platform == "win32":
 
 VERSION = "2.0.0"
 
+# Public CLI aliases use shell-friendly identifiers; SearXNG selects engines by
+# the configured engine "name", which can contain spaces or dots.
+ENGINE_ALIASES = {
+    "google_scholar": "google scholar",
+    "semantic_scholar": "semantic scholar",
+    "github_code": "github code",
+    "crates": "crates.io",
+    "lib_rs": "lib.rs",
+    "pkg_go_dev": "pkg.go.dev",
+    "microsoft_learn": "microsoft learn",
+    "annas_archive": "annas archive",
+}
+
+ENGINE_DISPLAY_NAMES = {
+    "google",
+    "bing",
+    "duckduckgo",
+    "arxiv",
+    "openalex",
+    "dblp",
+    "pubmed",
+    "github",
+    "hackernews",
+    "gitlab",
+    "huggingface",
+    "npm",
+    "pypi",
+    "sourcehut",
+    "nvd",
+    "reddit",
+    "wikidata",
+    "zlibrary",
+    *ENGINE_ALIASES.values(),
+}
+
+
+def _normalize_engine_name(engine):
+    if not engine:
+        return None
+    key = engine.strip().lower().replace("-", "_")
+    key = "_".join(key.split())
+    return ENGINE_ALIASES.get(key, engine.strip())
+
+
+def _result_engines(result):
+    engines = result.get("engines") or []
+    engine = result.get("engine")
+    if engine:
+        engines.append(engine)
+    return {name for name in engines if name}
+
+
+def _validate_engine_results(requested_engine, results):
+    if not requested_engine or not results:
+        return
+
+    expected = _require_known_engine(requested_engine)
+
+    mismatches = []
+    for result in results:
+        engines = _result_engines(result)
+        if engines and expected not in engines:
+            mismatches.append({
+                "title": result.get("title", ""),
+                "url": result.get("url", ""),
+                "engines": sorted(engines),
+            })
+
+    if mismatches:
+        raise RuntimeError(json.dumps({
+            "error_type": "engine_mismatch",
+            "engine": requested_engine,
+            "searxng_engine": expected,
+            "message": "SearXNG returned results from a different engine than requested.",
+            "hint": "The backend may not recognize the requested engine name; check its settings.yml engine names.",
+            "mismatches": mismatches[:3],
+        }))
+
+
+def _require_known_engine(engine):
+    expected = _normalize_engine_name(engine)
+    if expected not in ENGINE_DISPLAY_NAMES:
+        raise RuntimeError(json.dumps({
+            "error_type": "unknown_engine",
+            "engine": engine,
+            "message": f"Unknown engine '{engine}'.",
+            "hint": "Use one engine from the documented list, e.g. google_scholar, semantic_scholar, arxiv, github, or reddit.",
+        }))
+    return expected
+
 # --- Tavily support (opt-in via SEARCH_PROVIDER=tavily + TAVILY_API_KEY) ---
 
 def _get_search_provider():
@@ -93,8 +183,9 @@ def _run_with_timeout(fn, timeout):
 def search(query, num=10, engines=None, lang=None, categories=None, timeout=30):
     """Search. Returns dict with results, unresponsive_engines, raw."""
     params = {"q": query, "format": "json", "pageno": 1}
+    requested_engine = engines
     if engines:
-        params["engines"] = engines
+        params["engines"] = _require_known_engine(engines)
     elif not categories:
         params["engines"] = "google"
     if lang:       params["language"] = lang
@@ -174,8 +265,11 @@ def search(query, num=10, engines=None, lang=None, categories=None, timeout=30):
             "first_200_bytes": raw[:200],
         }))
 
+    results = data.get("results", [])[:num]
+    _validate_engine_results(requested_engine, results)
+
     return {
-        "results": data.get("results", [])[:num],
+        "results": results,
         "unresponsive_engines": data.get("unresponsive_engines", []),
         "number_of_results": data.get("number_of_results", 0),
     }

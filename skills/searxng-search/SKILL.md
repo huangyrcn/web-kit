@@ -74,6 +74,10 @@ If you do not specify any flags:
 Engines are grouped by what they index. Choose at most one non-default engine
 per search. To compare sources, run separate searches.
 
+The CLI exposes shell-friendly aliases such as `google_scholar` and
+`semantic_scholar`; the script maps them to SearXNG's configured engine names
+such as `google scholar` and `semantic scholar`.
+
 | Group | Engines |
 |---|---|
 | General | google, bing, duckduckgo |

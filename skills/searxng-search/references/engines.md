@@ -3,6 +3,8 @@
 searxng-search supports the following engines, default is Google. Use at most
 one non-default engine per search; run separate searches to compare engines.
 The group table lives in SKILL.md; this file holds per-engine usage notes.
+CLI aliases use underscores for shell convenience; the script maps them to
+SearXNG engine names such as `google scholar` before making the request.
 
 ```bash
 uv run --script ${SKILL_DIR}/scripts/searxng-search "query"                                      # default Google
