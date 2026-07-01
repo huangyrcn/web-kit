@@ -17,6 +17,7 @@ Endpoints:
   /bing?q=xxx           → Bing search (via Chrome)
   /arxiv?q=xxx          → arXiv search (via Chrome)
   /google_scholar?q=xxx → Google Scholar search (via Chrome CDP)
+  /semantic_scholar?q=xxx → Semantic Scholar search (via Chrome CDP)
   /open?url=xxx         → Open URL for manual interaction via VNC
   /health               → health check
 """
@@ -42,6 +43,7 @@ FAILURE_CACHE_SECONDS = int(os.environ.get("FAILURE_CACHE_SECONDS", "0"))
 # retrying in-place heals the transient cases so a single CAPTCHA doesn't fail the
 # whole query (and doesn't poison SearxNG into suspending the engine).
 GOOGLE_CAPTCHA_RETRIES = int(os.environ.get("GOOGLE_CAPTCHA_RETRIES", "2"))
+SEMANTIC_SCHOLAR_RETRIES = int(os.environ.get("SEMANTIC_SCHOLAR_RETRIES", "1"))
 _CAPTCHA_BACKOFFS = [2, 4]
 
 
@@ -930,6 +932,165 @@ async def search_google_scholar(q: str = Query(..., min_length=1), limit: int = 
         except Exception as e:
             logger.exception("Google Scholar search failed")
             _record_failure("google_scholar")
+            return JSONResponse({"error": str(e), "results": []}, status_code=500)
+    finally:
+        _page_sem.release()
+
+
+# ─── Semantic Scholar (via Chrome CDP) ───────────────────────────────────────
+
+_SEMANTIC_SCHOLAR_EXTRACT_JS = r"""
+() => {
+  const text = (el) => (el && (el.innerText || el.textContent) || '').trim().replace(/\s+/g, ' ');
+  const out = [];
+  const rows = document.querySelectorAll('.cl-paper-row');
+  for (const row of rows) {
+    const titleLink = row.querySelector('a[href*="/paper/"]:not([href$="#citing-papers"])');
+    const titleEl = row.querySelector('.cl-paper-title');
+    const title = text(titleEl || titleLink);
+    const url = titleLink ? titleLink.href : '';
+    if (!title || !url) continue;
+
+    const authors = Array.from(row.querySelectorAll('.cl-paper-authors__author-box'))
+      .map(a => text(a)).filter(Boolean);
+    const fields = text(row.querySelector('.cl-paper-fos'));
+    const venue = text(row.querySelector('.cl-paper-venue'));
+    const publishedDate = text(row.querySelector('.cl-paper-pubdates'));
+    let snippet = text(row.querySelector('.tldr-abstract-replacement'));
+    snippet = snippet.replace(/^TLDR\s*/i, '').replace(/\s*Expand$/i, '').trim();
+    const citationEl = row.querySelector('.cl-paper-stats__citation-pdp-link, .cl-paper-stats__v2-citations');
+    const citationCount = citationEl ? text(citationEl).replace(/[^\d]/g, '') : '';
+    const readerLink = row.querySelector('a.cl-paper-action__reader-link[href]');
+    const sourceLink = row.querySelector('.cl-paper-view-paper[href]');
+    const pdfUrl = sourceLink ? sourceLink.href : (readerLink ? readerLink.href : '');
+    const source = sourceLink ? text(sourceLink).replace(/\s*\(opens in a new tab\)\s*/i, '').trim() : '';
+
+    out.push({
+      title,
+      url,
+      authors,
+      fields,
+      venue,
+      publishedDate,
+      snippet,
+      citationCount,
+      pdfUrl,
+      source,
+    });
+  }
+  return out;
+}
+"""
+
+
+def _semantic_scholar_is_blocked(page, content: str) -> bool:
+    cl = content.lower()
+    return (
+        "checking if the site connection is secure" in cl
+        or "enable javascript and cookies to continue" in cl
+        or "cf-challenge" in cl
+        or "g-recaptcha" in cl
+    )
+
+
+def _format_semantic_scholar_content(item: dict) -> str:
+    parts = []
+    meta = []
+    if item.get("authors"):
+        meta.append(", ".join(item["authors"]))
+    if item.get("venue"):
+        meta.append(item["venue"])
+    if item.get("publishedDate"):
+        meta.append(item["publishedDate"])
+    if item.get("fields"):
+        meta.append(item["fields"])
+    if item.get("citationCount"):
+        meta.append(f"Cited by {item['citationCount']}")
+    if item.get("source"):
+        meta.append(item["source"])
+    if item.get("pdfUrl"):
+        meta.append(f"PDF: {item['pdfUrl']}")
+    if meta:
+        parts.append(" | ".join(meta))
+    if item.get("snippet"):
+        parts.append(item["snippet"])
+    return ". ".join(parts)
+
+
+async def _parse_semantic_scholar(page, limit: int) -> list[dict]:
+    results: list[dict] = []
+    try:
+        await page.wait_for_selector(".cl-paper-row, a[href*='/paper/']", timeout=15000)
+    except Exception:
+        logger.warning("Semantic Scholar: timeout waiting for results")
+        return results
+
+    try:
+        raw = await page.evaluate(_SEMANTIC_SCHOLAR_EXTRACT_JS)
+    except Exception as e:
+        logger.warning("Semantic Scholar: JS extraction failed: %s", e)
+        raw = []
+
+    seen_urls: set[str] = set()
+    for item in raw or []:
+        if len(results) >= limit:
+            break
+        title = (item.get("title") or "").strip()
+        url = (item.get("url") or "").split("#", 1)[0].strip()
+        if not title or not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        results.append({
+            "title": title,
+            "url": url,
+            "content": _format_semantic_scholar_content(item),
+            "authors": item.get("authors") or [],
+            "fields": (item.get("fields") or "").strip(),
+            "venue": (item.get("venue") or "").strip(),
+            "publishedDate": (item.get("publishedDate") or "").strip(),
+            "citation_count": (item.get("citationCount") or "").strip(),
+            "pdf_url": (item.get("pdfUrl") or "").strip(),
+            "source": (item.get("source") or "").strip(),
+        })
+
+    return results
+
+
+@app.get("/semantic_scholar")
+async def search_semantic_scholar(q: str = Query(..., min_length=1), limit: int = Query(10, ge=1, le=30)):
+    quarantine = _check_failure("semantic_scholar")
+    if quarantine is not None:
+        return JSONResponse(
+            {"error": f"semantic_scholar quarantined for {int(quarantine)}s after recent failure", "results": []},
+            status_code=503,
+        )
+
+    try:
+        browser = await _ensure_browser()
+    except Exception as e:
+        return JSONResponse({"error": f"chrome unreachable: {e}", "results": []}, status_code=503)
+
+    try:
+        await asyncio.wait_for(_page_sem.acquire(), timeout=30)
+    except asyncio.TimeoutError:
+        return JSONResponse({"error": "queue timeout", "results": []}, status_code=503)
+
+    try:
+        ctx = await _get_context(browser)
+        url = f"https://www.semanticscholar.org/search?q={quote_plus(q)}&sort=relevance"
+        try:
+            results = await _search_with_retry(
+                ctx, url,
+                lambda p: _parse_semantic_scholar(p, limit),
+                _semantic_scholar_is_blocked, "semantic_scholar", SEMANTIC_SCHOLAR_RETRIES,
+            )
+            return {"query": q, "engine": "semantic_scholar", "results": results}
+        except _CaptchaExhausted:
+            logger.error("Semantic Scholar challenge persisted — returning empty.")
+            return {"query": q, "engine": "semantic_scholar", "results": [], "note": "challenge"}
+        except Exception as e:
+            logger.exception("Semantic Scholar search failed")
+            _record_failure("semantic_scholar")
             return JSONResponse({"error": str(e), "results": []}, status_code=500)
     finally:
         _page_sem.release()

@@ -21,10 +21,8 @@ services:
       WEB_KIT_VNC_PASSWORD: ${WEB_KIT_VNC_PASSWORD:-}
       WEB_KIT_API_KEY: ${WEB_KIT_API_KEY:?WEB_KIT_API_KEY must be set in .env}
       WEB_KIT_NOVNC_HASH: ${WEB_KIT_NOVNC_HASH:?WEB_KIT_NOVNC_HASH must be set in .env}
-      SEMANTIC_SCHOLAR_API_KEY: ${SEMANTIC_SCHOLAR_API_KEY:-}
     volumes:
       - ./searxng-settings:/etc/searxng:rw
-      - ./searxng-engines/semantic_scholar_api.py:/usr/local/searxng/searx/engines/semantic_scholar_api.py:ro
       - chrome-profile:/data/chrome-profile
     healthcheck:
       test: ["CMD", "/usr/local/bin/healthcheck.sh"]
