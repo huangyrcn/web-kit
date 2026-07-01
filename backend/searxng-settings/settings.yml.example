@@ -86,7 +86,7 @@ engines:
     content_query: content
     categories: [science]
     disabled: false
-    timeout: 15.0
+    timeout: 30.0
     paging: false
 
   - name: google scholar
