@@ -64,7 +64,9 @@ engines:
   - name: semantic scholar
     engine: semantic_scholar_api
     shortcut: se
-    api_key: "YOUR_SEMANTIC_SCHOLAR_API_KEY"
+    # Prefer SEMANTIC_SCHOLAR_API_KEY in backend/.env. Set api_key here only
+    # when you do not use docker-compose environment injection.
+    api_key: ""
     disabled: false
 
   - name: arxiv

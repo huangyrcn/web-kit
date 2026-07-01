@@ -55,6 +55,7 @@ RUN mkdir -p /etc/searxng-default \
 # App code
 WORKDIR /app
 COPY server.py /app/server.py
+COPY searxng-engines/semantic_scholar_api.py /usr/local/searxng/searx/engines/semantic_scholar_api.py
 COPY Caddyfile /etc/caddy/Caddyfile
 COPY start-xvfb.sh start-chrome.sh start-searxng.sh start-vnc.sh start-caddy.sh watchdog.sh healthcheck.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/start-xvfb.sh \
@@ -75,4 +76,3 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/supervisord.conf"]
-
