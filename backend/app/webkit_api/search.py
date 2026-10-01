@@ -105,7 +105,10 @@ async def search(
         raise WebkitError(
             "engines_failed",
             "every engine failed: " + "; ".join(f"{r['engine']}={r['error']}" for r in tried),
-            hint="network-class failures usually mean the backend lost egress; see `webkit status`",
+            hint=("the backend lost its route out; see `webkit status`" if set(classes) <= {"network", "timeout"}
+                  else "an anti-bot check blocked the browser; solve it once via `webkit browser open URL` (noVNC)"
+                  if set(classes) & {"captcha", "blocked", "human_required"}
+                  else "see `webkit status` for engine health"),
             engines=report, classes=classes,
         )
 

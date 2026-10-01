@@ -17,7 +17,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 from . import browser, settings
-from .download import fetch_bytes, looks_like_human_wall
+from .download import HUMAN_MARKERS, fetch_bytes
 from .errors import WebkitError, classify
 
 logger = logging.getLogger("webkit.page")
@@ -159,11 +159,28 @@ def _markdown(result, fit: bool) -> str:
     return getattr(md, "raw_markdown", "") or str(md)
 
 
+_CHALLENGE_DONE_JS = (
+    "js:() => !/just a moment|verifying your browser|checking your browser|are you a robot|attention required|请稍候|正在验证/i"
+    ".test(document.title + ' ' + (document.body ? document.body.innerText.slice(0, 400) : ''))"
+)
+
+
+def _is_challenge(result) -> bool:
+    """A short page whose title/text is an anti-bot interstitial, or crawl4ai's own block verdict."""
+    if (result.error_message or "").startswith("Blocked by anti-bot protection"):
+        return True
+    title = ((result.metadata or {}).get("title") or "").lower()
+    text = _markdown(result, False)
+    if len(text) > 4000:
+        return False
+    head = (title + " " + text[:2000]).lower()
+    return any(m in head for m in HUMAN_MARKERS)
+
+
 def _check_result(result, url: str) -> None:
-    if looks_like_human_wall("text/html", (result.html or "")[:20000].encode("utf-8", "ignore")) \
-            and len(_markdown(result, False)) < 3000:
+    if _is_challenge(result):
         raise WebkitError(
-            "human_required", "the page is a CAPTCHA / verification wall",
+            "human_required", "the site shows an anti-bot / verification page that the browser did not pass",
             hint=f"solve it once with `webkit browser open '{url}'` (noVNC), then retry", url=url,
         )
     if not result.success:
@@ -198,6 +215,15 @@ async def page(req: PageRequest):
             async with AsyncWebCrawler(config=_browser_config()) as crawler:
                 result = await asyncio.wait_for(crawler.arun(url=req.url, config=config),
                                                 timeout=req.timeout + 15)
+                # A real browser usually clears Cloudflare-style interstitials on its own
+                # within seconds; the first capture can be too early. Retry once, waiting
+                # until the title/text no longer looks like a challenge.
+                if _is_challenge(result) or (not result.success and "_crawl_web" in (result.error_message or "")):
+                    logger.info("challenge or crawl error on %s; retrying with wait", req.url)
+                    retry = _run_config(req.format == "fit", False, _CHALLENGE_DONE_JS, req.scroll,
+                                        max(req.timeout, 30))
+                    result = await asyncio.wait_for(crawler.arun(url=req.url, config=retry),
+                                                    timeout=max(req.timeout, 30) + 15)
         except WebkitError:
             raise
         except Exception as e:  # noqa: BLE001

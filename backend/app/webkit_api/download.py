@@ -30,8 +30,12 @@ logger = logging.getLogger("webkit.download")
 router = APIRouter()
 
 CHUNK = 1 << 20
-_HUMAN_MARKERS = ("recaptcha", "g-recaptcha", "verify you are human", "unusual traffic",
-                  "checking if the site connection is secure", "cf-challenge", "captcha")
+# Interstitials seen in practice (Cloudflare, ScienceDirect, OpenReview, PubMed/PMC, Google).
+HUMAN_MARKERS = ("recaptcha", "g-recaptcha", "verify you are human", "unusual traffic",
+                 "checking if the site connection is secure", "cf-challenge", "captcha",
+                 "just a moment", "are you a robot", "verifying your browser", "checking your browser",
+                 "complete the check below", "attention required", "enable javascript and cookies",
+                 "请稍候", "正在验证", "是否是真人")  # Cloudflare in a zh-CN browser
 
 
 @dataclass
@@ -78,7 +82,7 @@ def looks_like_human_wall(content_type: str, head: bytes) -> bool:
     if "html" not in content_type:
         return False
     text = head[:8192].decode("utf-8", errors="ignore").lower()
-    return any(m in text for m in _HUMAN_MARKERS)
+    return any(m in text for m in HUMAN_MARKERS)
 
 
 async def fetch(url: str, max_bytes: int) -> Fetched:

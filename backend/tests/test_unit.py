@@ -192,3 +192,39 @@ def test_page_rejects_non_http():
 def test_crawl_caps():
     resp = client.post("/v2/crawl", json={"url": "https://example.org", "max_pages": 999})
     assert resp.status_code == 400 and "capped" in resp.json()["message"]
+
+
+class _FakeResult:
+    def __init__(self, title="", markdown="", error=None, success=True, status=200):
+        self.metadata = {"title": title}
+        self.markdown = markdown
+        self.error_message = error
+        self.success = success
+        self.status_code = status
+
+
+@pytest.mark.parametrize("title,md,error,expected", [
+    ("Just a moment...", "# Are you a robot? Please confirm you are a human", None, True),
+    ("Verifying your browser | OpenReview", "Complete the check below to continue", None, True),
+    ("", "", "Blocked by anti-bot protection: Cloudflare JS challenge", True),
+    ("Self-supervised learning of molecules", "A long article about CAPTCHA design. " * 200, None, False),
+    ("Example Domain", "This domain is for use in documentation examples.", None, False),
+])
+def test_challenge_detection(title, md, error, expected):
+    from webkit_api.page import _is_challenge
+    assert _is_challenge(_FakeResult(title, md, error)) is expected
+
+
+def test_challenge_detection_zh():
+    from webkit_api.page import _is_challenge
+    assert _is_challenge(_FakeResult("请稍候…", "正在验证您是否是真人。这可能需要几秒钟时间。"))
+
+
+def test_wall_response_detection():
+    class R:
+        def __init__(self, status, headers=None):
+            self.status, self.headers = status, headers or {}
+    assert serp._is_wall_response(R(405, {"x-amzn-waf-action": "captcha"}), "")
+    assert serp._is_wall_response(R(403), "<title>Just a moment...</title>")
+    assert not serp._is_wall_response(R(404), "captcha")
+    assert not serp._is_wall_response(R(200), "captcha")

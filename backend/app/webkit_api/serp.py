@@ -18,6 +18,7 @@ from typing import Awaitable, Callable
 from urllib.parse import parse_qs, quote_plus, urlparse
 
 from . import browser, settings
+from .download import HUMAN_MARKERS
 from .errors import WebkitError, classify
 
 logger = logging.getLogger("webkit.serp")
@@ -46,7 +47,7 @@ async def _render_in_slot(engine, url, parse, is_captcha, retries, goto_timeout)
         try:
             resp = await page.goto(url, wait_until="domcontentloaded", timeout=goto_timeout)
             content = await page.content()
-            if is_captcha is not None and is_captcha(page, content):
+            if (is_captcha is not None and is_captcha(page, content)) or _is_wall_response(resp, content):
                 last = WebkitError(
                     "captcha", f"{engine} served a CAPTCHA/challenge page",
                     hint="solve it once via `webkit browser open <url>` (noVNC); cookies then persist",
@@ -68,6 +69,16 @@ async def _render_in_slot(engine, url, parse, is_captcha, retries, goto_timeout)
             continue
         break
     raise last
+
+
+def _is_wall_response(resp, content: str) -> bool:
+    """An error status that is really an anti-bot interstitial (AWS WAF answers 405)."""
+    if resp is None or resp.status not in (403, 405, 429, 503):
+        return False
+    if resp.headers.get("x-amzn-waf-action"):
+        return True
+    cl = content[:20000].lower()
+    return "awswaf" in cl or any(m in cl for m in HUMAN_MARKERS)
 
 
 async def _wait_results(page, selector: str, engine: str, no_results_markers: tuple[str, ...] = (),
@@ -344,7 +355,7 @@ def s2_is_blocked(page, content: str) -> bool:
     cl = content.lower()
     return ("checking if the site connection is secure" in cl
             or "enable javascript and cookies to continue" in cl
-            or "cf-challenge" in cl or "g-recaptcha" in cl)
+            or "cf-challenge" in cl or "g-recaptcha" in cl or "awswaf" in cl or "human verification" in cl)
 
 
 async def semantic_scholar(q: str, limit: int, time_range: str | None = None, lang: str | None = None) -> list[dict]:

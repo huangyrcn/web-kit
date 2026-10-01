@@ -79,6 +79,8 @@ def test_search(args, expect_engine):
 def test_each_engine_answers_itself(engine, query):
     """A profile hides a broken engine behind its fallback; test each one directly."""
     code, out, err = webkit("search", "-e", engine, "-n", "3", query)
+    if code == 3 and any(f"={c}" in err for c in ("captcha", "blocked", "human_required")):
+        pytest.skip(f"{engine}: upstream anti-bot challenge (solve once via noVNC): {err.splitlines()[-1][:160]}")
     assert code == 0, (out, err)
     assert out.splitlines()[0].startswith(f"# engines {engine}=ok:"), out.splitlines()[0]
     assert "http" in out
