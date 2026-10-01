@@ -102,7 +102,7 @@ Get the file itself (PDF, archive, dataset), saved to disk through the backend
 browser, so its logins and cookies apply. Prints the saved path, not the content.
 Targets: URLs, DOIs, arXiv IDs. A paper page resolves to the PDF it links; any other
 web page is an error (not_a_file): use `read` for text.
-Default destination: /home/ray/.cache/web-kit/downloads/ ($WEBKIT_DOWNLOAD_DIR).
+Default destination: ~/.cache/web-kit/downloads/ ($WEBKIT_DOWNLOAD_DIR).
 
 positional arguments:
   TARGET

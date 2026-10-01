@@ -159,6 +159,12 @@ def _snippets(limit: int):
     return step
 
 
+def _tilde(path: Path) -> str:
+    """Paths under $HOME as ~/..., so generated help (and the skill) carry no username."""
+    home = str(Path.home())
+    return "~" + str(path)[len(home):] if str(path).startswith(home + os.sep) else str(path)
+
+
 def _cache_file(kind: str, stem: str, ext: str) -> Path:
     d = config.cache_dir() / kind
     d.mkdir(parents=True, exist_ok=True)
@@ -689,7 +695,7 @@ Get the file itself (PDF, archive, dataset), saved to disk through the backend
 browser, so its logins and cookies apply. Prints the saved path, not the content.
 Targets: URLs, DOIs, arXiv IDs. A paper page resolves to the PDF it links; any other
 web page is an error (not_a_file): use `read` for text.
-Default destination: {config.download_dir()}/ ($WEBKIT_DOWNLOAD_DIR).""")
+Default destination: {_tilde(config.download_dir())}/ ($WEBKIT_DOWNLOAD_DIR).""")
     d.add_argument("url", metavar="TARGET")
     d.add_argument("-o", "--output", metavar="PATH", help="target file or directory")
     d.add_argument("--max-mb", type=int, default=0, help="size limit in MB (default: backend limit)")
