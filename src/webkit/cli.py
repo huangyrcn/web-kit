@@ -214,6 +214,8 @@ def _download_once(client: Client, url: str, dest: Path | None, max_mb: int) -> 
                 while chunk := resp.read(1 << 20):
                     f.write(chunk)
                     size += len(chunk)
+            if size == 0:
+                raise ApiError("upstream_http", "the backend delivered an empty file; nothing saved")
             if expected and int(expected) != size:
                 raise ApiError("network", f"download truncated: got {size} of {expected} bytes")
             os.replace(tmp, target)

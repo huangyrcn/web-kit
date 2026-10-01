@@ -10,13 +10,11 @@ FROM mcr.microsoft.com/playwright/python:v1.52.0-noble
 
 # Pinned upstreams. Bump deliberately; the values are reported by /v2/version.
 ARG SEARXNG_REF=a9d99003344ac3879ec45c56c661283482a92a39
-ARG IMAGE_TAG=dev
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     SEARXNG_SETTINGS_PATH=/etc/searxng/settings.yml \
-    WEBKIT_SEARXNG_REF=${SEARXNG_REF} \
-    WEBKIT_IMAGE_TAG=${IMAGE_TAG}
+    WEBKIT_SEARXNG_REF=${SEARXNG_REF}
 
 # dpkg fsyncs every file it unpacks; on HDD-backed ZFS that turns a 3 s
 # download into a 9 min install. An image layer needs no crash safety.
@@ -60,6 +58,10 @@ COPY supervisord.conf /etc/supervisor/supervisord.conf
 COPY start-xvfb.sh start-chrome.sh start-searxng.sh start-vnc.sh start-caddy.sh watchdog.sh healthcheck.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/*.sh \
     && google-chrome-stable --version > /etc/webkit-chrome-version
+
+# Last on purpose: a different tag must not invalidate the cached layers above.
+ARG IMAGE_TAG=dev
+ENV WEBKIT_IMAGE_TAG=${IMAGE_TAG}
 
 EXPOSE 8082 6080 9223
 VOLUME /data/chrome-profile

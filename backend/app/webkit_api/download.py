@@ -70,7 +70,8 @@ class Fetched:
 
 
 def _decode(body: dict) -> bytes:
-    data = body.get("data", "")
+    # IO.read returns "data"; Fetch.getResponseBody returns "body".
+    data = body.get("data", body.get("body", ""))
     if body.get("base64Encoded"):
         return base64.b64decode(data)
     try:
@@ -132,6 +133,14 @@ async def _via_stream(url: str) -> Fetched:
         await browser.safe_close(page)
 
     try:
+        # From about:blank the request has an opaque origin, and resources that send
+        # Cross-Origin-Resource-Policy are refused (net::ERR_BLOCKED_BY_RESPONSE).
+        # Put the frame on the target origin first; robots.txt is cheap.
+        u = urlparse(url)
+        try:
+            await page.goto(f"{u.scheme}://{u.netloc}/robots.txt", wait_until="domcontentloaded", timeout=15000)
+        except Exception:  # noqa: BLE001 - best effort; about:blank still works for many hosts
+            pass
         cdp = await ctx.new_cdp_session(page)
         tree = await cdp.send("Page.getFrameTree")
         res = (await cdp.send("Network.loadNetworkResource", {
@@ -152,6 +161,8 @@ async def _via_stream(url: str) -> Fetched:
             return _decode(chunk), bool(chunk.get("eof"))
 
         first, eof = await read_chunk()
+        if not first and eof:
+            raise WebkitError("upstream_http", f"site returned an empty body (HTTP {status})")
 
         async def rest() -> AsyncIterator[bytes]:
             nonlocal eof
@@ -215,6 +226,9 @@ async def _via_navigate(url: str) -> Fetched:
     if status >= 400 and not looks_like_human_wall(headers.get("content-type", ""), body):
         await cleanup()
         raise WebkitError("upstream_http", f"site returned HTTP {status}", status_code=status)
+    if not body:
+        await cleanup()
+        raise WebkitError("upstream_http", f"site returned an empty body (HTTP {status})")
     headers["content-length"] = str(len(body))
 
     async def empty() -> AsyncIterator[bytes]:

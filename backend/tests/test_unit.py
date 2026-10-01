@@ -234,3 +234,11 @@ def test_wall_response_detection():
     assert serp._is_wall_response(R(403), "<title>Just a moment...</title>")
     assert not serp._is_wall_response(R(404), "captcha")
     assert not serp._is_wall_response(R(200), "captcha")
+
+
+def test_decode_handles_io_read_and_fetch_bodies():
+    from webkit_api.download import _decode
+    import base64
+    assert _decode({"data": base64.b64encode(b"%PDF-1").decode(), "base64Encoded": True}) == b"%PDF-1"
+    assert _decode({"body": base64.b64encode(b"%PDF-2").decode(), "base64Encoded": True}) == b"%PDF-2"
+    assert _decode({"body": "plain", "base64Encoded": False}) == b"plain"

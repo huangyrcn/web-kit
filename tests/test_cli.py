@@ -208,3 +208,9 @@ def test_doctor_reports(capsys):
     assert run("doctor") == 3
     out = capsys.readouterr().out
     assert "✗ egress DOWN: www.google.com" in out and "✓ admin key accepted" in out
+
+
+def test_download_rejects_empty_file(tmp_path, capsys):
+    ROUTES[("GET", "/v2/download")] = lambda h, q, b: h._send(200, b"", "application/pdf", {"X-Webkit-Filename": "x.pdf"})
+    assert run("download", "https://x/x.pdf") == 3
+    assert not (tmp_path / "dl" / "x.pdf").exists()
