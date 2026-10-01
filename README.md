@@ -75,9 +75,11 @@ later) · 8 blocked (the site refuses this server; don't retry, use another sour
 Errors are one JSON line on stderr whose `hint` says what to do next.
 
 Output is budgeted so page text cannot flood an agent's context: each command prints at
-most `--max-chars` characters (default 4000, at most 20000). A longer page is saved to
-`~/.cache/web-kit/pages/` and only a preview plus its path is printed; with `-o` only
-paths are printed; `--json` changes the format, never the amount.
+most `--max-chars` characters in total, stdout and stderr together (default 4000, at most
+20000). A longer page is saved to `~/.cache/web-kit/pages/` and only a preview plus its
+path is printed; with `-o` only paths are printed; whatever else does not fit (long lists,
+many errors) goes to one file named in the last line; `--json` changes the format, never
+the amount.
 
 ## Backend
 

@@ -39,61 +39,64 @@ DEFAULT_BUDGET = 4000   # chars a content command prints (search / read / crawl 
 MAX_BUDGET = 20000      # hard ceiling for --max-chars; full text only ever goes to files
 DIAG_BUDGET = 20000     # status / doctor / engines
 NOTE_RESERVE = 300      # room kept for each "saved to ..." line
-ERR_LINE_MAX = 2000
+FINAL_RESERVE = 300     # room kept for the closing "more output in FILE" line
+MIN_BUDGET = 600        # below this the closing line itself would not fit
+ERR_LINE_MAX = 1200
 
 
 # ─── output: one budget per command ───────────────────────────────────────────
 
 class Output:
-    """Everything a command prints to stdout goes through here. Past the budget, the
-    output continues in a spill file (holding the full output) and one note says where."""
+    """Everything a command prints (stdout and stderr) goes through here, under one
+    budget. Whole lines only: a line that does not fit, and everything after it, goes to
+    a spill file (which also repeats what was shown), and one closing line, paid for from
+    a small reserve inside the budget, says where."""
 
     def __init__(self) -> None:
-        self.limit: int | None = None
-        self.used = 0
-        self.cmd = "webkit"
-        self._printed: list[str] = []
-        self._spill = None
-        self.spill_path: Path | None = None
+        self.configure(None, "webkit")
 
     def configure(self, limit: int | None, cmd: str) -> None:
         self.limit, self.used, self.cmd = limit, 0, cmd
-        self._printed, self._spill, self.spill_path = [], None, None
+        self._shown: list[str] = []
+        self._spill = None
+        self.spill_path: Path | None = None
+        self.spilled = self.spilled_errors = 0
+        self.hints_seen: set[str] = set()
 
     def remaining(self) -> int:
-        return 10**12 if self.limit is None else max(0, self.limit - self.used)
+        """Room left for ordinary lines (the closing line's reserve excluded)."""
+        if self.limit is None:
+            return 10**12
+        return max(0, self.limit - FINAL_RESERVE - self.used)
 
-    def write(self, text: str) -> None:
+    def write(self, text: str, stream=None) -> None:
+        stream = stream or sys.stdout
         if not text.endswith("\n"):
             text += "\n"
-        if self._spill is not None:
-            self._spill.write(text)
-            return
-        if self.limit is None or len(text) <= self.remaining():
-            sys.stdout.write(text)
+        if self._spill is None and len(text) <= self.remaining():
+            stream.write(text)
             self.used += len(text)
             if self.limit is not None:
-                self._printed.append(text)
+                self._shown.append(text)
             return
-        head = text[: self.remaining()]
-        sys.stdout.write(head + ("" if head.endswith("\n") else "\n"))
-        self.used = self.limit
-        self.spill_path = _cache_file("output", f"{self.cmd}-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}", ".txt")
-        self._spill = self.spill_path.open("w", encoding="utf-8")
-        self._spill.write("".join(self._printed) + text)
-
-    def note(self, text: str) -> None:
-        """An essential short line (a saved-file pointer): printed even at the budget."""
-        sys.stdout.write(text + "\n")
-        self.used += len(text) + 1
+        if self._spill is None:
+            self.spill_path = _cache_file("output", f"{self.cmd}-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}",
+                                          ".txt")
+            self._spill = self.spill_path.open("w", encoding="utf-8")
+            self._spill.write("".join(self._shown))
+        self._spill.write(text)
+        self.spilled += text.count("\n")
+        if stream is sys.stderr:
+            self.spilled_errors += 1
 
     def close(self) -> None:
-        if self._spill is not None:
-            self._spill.close()
-            size = self.spill_path.stat().st_size
-            self.note(f"[output stopped at {self.limit} chars; the full output ({size} bytes) is in "
-                      f"{self.spill_path}: search it (grep -n) and read only the lines you need]")
-            self._spill = None
+        if self._spill is None:
+            return
+        self._spill.close()
+        self._spill = None
+        errors = f", {self.spilled_errors} of them errors" if self.spilled_errors else ""
+        sys.stdout.write(f"[{self.spilled} more lines{errors} not shown (output budget {self.limit}); all output is "
+                         f"in {self.spill_path}: search it with grep -n -m 10 'term' FILE | cut -c1-200]\n")
 
 
 OUT = Output()
@@ -104,12 +107,20 @@ def out(text: str = "") -> None:
 
 
 def err_json(body: dict) -> None:
+    """One JSON line on stderr, inside the command's budget. A hint already shown in this
+    command is not repeated."""
+    body = dict(body)
+    hint = body.get("hint")
+    if hint and hint in OUT.hints_seen:
+        body["hint"] = "(same as above)"
+    elif hint:
+        OUT.hints_seen.add(hint)
     line = json.dumps(body, ensure_ascii=False)
     if len(line) > ERR_LINE_MAX:
-        slim = {k: (v[:500] if isinstance(v, str) else v) for k, v in body.items()
+        slim = {k: (v[:400] if isinstance(v, str) else v) for k, v in body.items()
                 if k in ("error", "message", "hint", "url", "status", "vnc", "classes")}
         line = json.dumps(slim, ensure_ascii=False)[:ERR_LINE_MAX]
-    sys.stderr.write(line + "\n")
+    OUT.write(line, stream=sys.stderr)
 
 
 def print_json(data, summary: dict | None = None, shrink=()) -> None:
@@ -131,8 +142,8 @@ def print_json(data, summary: dict | None = None, shrink=()) -> None:
         if len(compact) + 1 <= OUT.remaining():
             out(compact)
             return
-    OUT.note(json.dumps({"truncated": True, "saved_to": str(path), "chars": len(text), "summary": summary or {}},
-                        ensure_ascii=False))
+    out(json.dumps({"truncated": True, "saved_to": str(path), "chars": len(text), "summary": summary or {}},
+                   ensure_ascii=False))
 
 
 def _snippets(limit: int):
@@ -159,7 +170,7 @@ def _budget(args) -> int | None:
     asked = getattr(args, "max_chars", None)
     if default is None:
         return None
-    return min(asked if asked and asked > 0 else default, MAX_BUDGET)
+    return max(MIN_BUDGET, min(asked if asked and asked > 0 else default, MAX_BUDGET))
 
 
 def engines_header(report: list[dict]) -> str:
@@ -223,7 +234,7 @@ def cmd_search(args, client: Client) -> int:
 
     header = engines_header(data.get("engines", []))
     if args.urls:
-        sys.stderr.write(header + "\n")
+        OUT.write(header, stream=sys.stderr)
         for r in results:
             out(r["url"])
     else:
@@ -333,8 +344,8 @@ def _read_many(client: Client, urls: list[str], fmt: str, output: str | None, ti
                     out(header)
                 if preview:
                     out(preview)
-                OUT.note(f"[{len(preview)} of {len(text)} chars shown; the full text is in {path}: "
-                         "find the part you need (grep -n 'term' FILE) and read only those lines]")
+                out(f"[{len(preview)} of {len(text)} chars shown; the full text is in {path}: locate what you "
+                    "need with grep -n -m 10 'term' FILE | cut -c1-200, then read only those lines]")
         entries.append(meta)
     return code, entries
 
@@ -373,7 +384,7 @@ def cmd_crawl(args, client: Client) -> int:
         for e in index:
             out(f"saved {outdir / e['file']} ({e['chars']} chars) {e['url']}" if "file" in e
                 else f"failed {e['url']}: {e.get('error')}")
-        OUT.note(f"# crawled {data.get('count', 0)} pages -> {outdir}/index.json")
+        out(f"# crawled {data.get('count', 0)} pages -> {outdir}/index.json")
     return EXIT_OK if any("file" in e for e in index) else EXIT_FAILED
 
 
@@ -444,8 +455,8 @@ def _open_for_human(client: Client, url: str) -> None:
             client.get_json("/v2/admin/open", {"url": url}, admin=True, timeout=60)
         except ApiError as e:
             err_json(e.body)
-    sys.stderr.write(f"human action needed: open {client.cfg.vnc} (user webkit, password = admin key), "
-                     f"solve the page for {url}; retrying every 10s\n")
+    OUT.write(f"human action needed: open {client.cfg.vnc} (user webkit, password = admin key), "
+              f"solve the page for {url}; retrying every 10s", stream=sys.stderr)
 
 
 def cmd_status(args, client: Client) -> int:

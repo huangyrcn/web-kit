@@ -42,8 +42,9 @@ semantic_scholar, arxiv. API engines go through SearXNG (`searxng.py`).
 - `human_required` (a person can pass it in noVNC) vs `blocked` (the site refuses this server): `download.wall_kind`.
 - Error hints tell an agent what to do next (`errors.human_required` / `errors.blocked`).
 - `search` first line: `# engines <name>=<ok:N|empty|error:CLASS|skipped> ...`.
-- Output budget (`cli.Output`): a command prints at most `--max-chars` (default 4000, cap 20000);
-  page text beyond it goes to a file; `-o` prints paths only; `--json` never changes the amount.
+- Output budget (`cli.Output`): a command prints at most `--max-chars` (default 4000, cap 20000)
+  across stdout and stderr; page text beyond it goes to a file, other overflow to one spill file
+  named in the last line; `-o` prints paths only; `--json` never changes the amount.
 - An engine never returns `[]` for a page it could not read: it raises a classified error.
 
 ## Commands

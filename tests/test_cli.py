@@ -303,10 +303,10 @@ def test_long_page_is_saved_with_a_preview(tmp_path, capsys):
     _serve_pages()
     assert run("read", "https://x/a") == 0
     o, n = _stdout_len(capsys)
-    assert n <= cli.DEFAULT_BUDGET + 50
+    assert n <= cli.DEFAULT_BUDGET
     [path] = list((tmp_path / "cache" / "pages").iterdir())
     assert path.read_text() == BIG and str(path) in o
-    assert "--max-chars 0" not in o and "grep -n" in o
+    assert "--max-chars 0" not in o and "grep -n -m 10 'term' FILE | cut -c1-200" in o
 
 
 def test_short_page_is_printed(capsys):
@@ -350,7 +350,7 @@ def test_many_urls_share_one_budget(tmp_path, capsys):
     urls = [f"https://x/{i}" for i in range(10)]
     assert run("read", *urls) == 0
     o, n = _stdout_len(capsys)
-    assert n <= cli.DEFAULT_BUDGET + 10 * 50
+    assert n <= cli.DEFAULT_BUDGET
     assert len(list((tmp_path / "cache" / "pages").iterdir())) == 10
 
 
@@ -358,7 +358,7 @@ def test_links_obey_the_budget(capsys):
     _serve_pages(links=2000)
     assert run("read", "-f", "links", "--max-chars", "100", "https://x/a") == 0
     o, n = _stdout_len(capsys)
-    assert n < 100 + cli.NOTE_RESERVE
+    assert n <= cli.MIN_BUDGET  # tiny budgets are raised to the minimum that fits a file pointer
 
 
 def test_budget_has_a_hard_ceiling(capsys):
@@ -373,7 +373,7 @@ def test_long_listing_spills_to_a_file(tmp_path, capsys):
          for i in range(1, 60)], [{"engine": "google", "status": "ok", "count": 59}]))
     assert run("search", "-n", "59", "q") == 0
     o, n = _stdout_len(capsys)
-    assert n < cli.DEFAULT_BUDGET + 400 and "output stopped at" in o
+    assert n <= cli.DEFAULT_BUDGET and "not shown" in o
     [spill] = list((tmp_path / "cache" / "output").iterdir())
     assert "https://r/59" in spill.read_text()
 
@@ -407,3 +407,37 @@ def test_oversized_json_stub_keeps_its_summary_apart(capsys):
     assert run("search", "--json", "-n", "39", "q") == 0
     stub = json.loads(capsys.readouterr().out)
     assert stub["truncated"] is True and stub["summary"] == {"results": 39}
+
+
+
+@pytest.mark.parametrize("pages", [25, 100])
+def test_batch_notes_stay_inside_the_budget(tmp_path, capsys, pages):
+    _serve_pages()
+    assert run("read", *[f"https://x/{i}" for i in range(pages)]) == 0
+    c = capsys.readouterr()
+    assert len(c.out) + len(c.err) <= cli.DEFAULT_BUDGET
+    assert len(list((tmp_path / "cache" / "pages").iterdir())) == pages
+    if pages == 100:  # the notes that did not fit are in the spill file, not lost
+        [spill] = list((tmp_path / "cache" / "output").iterdir())
+        assert spill.read_text().count("the full text is in") == pages and str(spill) in c.out
+
+
+def test_batch_errors_share_the_budget_and_do_not_repeat_hints(tmp_path, capsys):
+    hint = ("needs a person; you cannot pass it. Do not retry or wait: report the URL as not accessible and "
+            "continue. If the user is present they can open it in the backend browser via noVNC.") * 2
+    ROUTES[("POST", "/v2/page")] = lambda h, q, b: h._send(
+        409, {"error": "human_required", "message": "the site shows a verification page", "hint": hint,
+              "url": b["url"]})
+    assert run("read", *[f"https://x/{i}" for i in range(40)]) == 6
+    c = capsys.readouterr()
+    assert len(c.out) + len(c.err) <= cli.DEFAULT_BUDGET
+    errs = [json.loads(l) for l in c.err.splitlines()]
+    assert errs[0]["hint"] == hint and all(e["hint"] == "(same as above)" for e in errs[1:])
+    [spill] = list((tmp_path / "cache" / "output").iterdir())
+    assert spill.read_text().count('"human_required"') == 40 and "of them errors" in c.out
+
+
+def test_skill_reading_advice_bounds_matches_and_line_length(capsys):
+    assert run("skill", "show") == 0
+    text = capsys.readouterr().out
+    assert "grep -n -m 10 'term' FILE | cut -c1-200" in text and "Never `cat`" in text

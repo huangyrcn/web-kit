@@ -43,11 +43,14 @@ Want to know what it says: `read`. Need the file: `download`.
 
 ## Rules
 
-- Output is budgeted: a command prints at most 4000 chars (`--max-chars`, up to 20000). Longer
-  page text is saved to a file and the output gives its path (plus a preview for `read`); with
-  `-o` only paths are printed. `--json` changes the format, never the amount.
-- Read saved files selectively: `grep -n 'term' FILE` to locate the part you need, then read just
-  those lines. Never `cat` a whole page or paper into context.
+- Output is budgeted: a command prints at most 4000 chars in total, errors included
+  (`--max-chars`, up to 20000). Longer page text is saved to a file and the output gives its path
+  (plus a preview for `read`); with `-o` only paths are printed; anything else that does not fit
+  goes to one file named in the last line. `--json` changes the format, never the amount.
+- Read saved files in small pieces; lines can be very long. Locate first:
+  `grep -n -m 10 'term' FILE | cut -c1-200`; then read only those line ranges (your file-reading
+  tool with an offset and a limit, or `sed -n 'START,ENDp' FILE | cut -c1-500`). Never `cat` a
+  whole page, paper or saved output.
 - `search` output starts with `# engines google=ok:8 duckduckgo=skipped ...`. `error:network` on
   every engine means the backend lost its route out: say so, do not guess results.
 - One shared browser and one exit IP serve every agent: no bulk searching, few parallel calls.
@@ -58,7 +61,7 @@ Want to know what it says: `read`. Need the file: `download`.
 webkit search -p academic "temporal knowledge graph forecasting LLM"
 webkit read https://example.org/post                                 # short page: printed; long: file + preview
 webkit read -o paper.md "https://openreview.net/pdf?id=FXdMgfCDer"   # a PDF comes back as text
-grep -n -i "ablation" paper.md                                       # then read only those lines
+grep -n -i -m 10 "ablation" paper.md | cut -c1-200                  # locate, then read only those lines
 webkit read --pdf -o paper.md 10.1145/3774904.3792101                # DOI -> paper page -> its PDF, as text
 webkit read arXiv:2403.01092                                         # the abstract page
 webkit download arXiv:2403.01092                                     # the PDF file
