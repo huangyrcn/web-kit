@@ -23,6 +23,7 @@ EXIT_AUTH = 4
 EXIT_UNREACHABLE = 5
 EXIT_HUMAN = 6
 EXIT_BUSY = 7
+EXIT_BLOCKED = 8
 
 _EXIT_BY_CLASS = {
     "invalid_request": EXIT_USAGE,
@@ -31,6 +32,7 @@ _EXIT_BY_CLASS = {
     "client_timeout": EXIT_UNREACHABLE,
     "human_required": EXIT_HUMAN,
     "busy": EXIT_BUSY,
+    "blocked": EXIT_BLOCKED,
 }
 
 

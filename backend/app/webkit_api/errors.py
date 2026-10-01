@@ -16,12 +16,13 @@ from fastapi.responses import JSONResponse
 ERROR_STATUS = {
     "invalid_request": 400,
     "not_found": 404,
-    "human_required": 409,   # CAPTCHA / login wall: solve it once via noVNC
+    "human_required": 409,   # CAPTCHA / login wall: only a person (noVNC) can pass it
+    "not_a_file": 422,       # /v2/download got a web page and found no file behind it
     "too_large": 413,
     "engines_failed": 502,   # every engine in the chain errored
     "network": 502,          # TCP/TLS/DNS failure reaching the upstream site
     "upstream_http": 502,    # upstream answered with an HTTP error status
-    "blocked": 502,          # anti-bot challenge the browser could not pass
+    "blocked": 502,          # the site refuses this server outright (IP / hard block)
     "captcha": 502,
     "unexpected_page": 502,  # page loaded but the expected result markup is missing
     "browser_unavailable": 503,
@@ -75,6 +76,24 @@ def classify(exc: BaseException) -> WebkitError:
     if "Target page, context or browser has been closed" in text or "Browser has been closed" in text:
         return WebkitError("browser_unavailable", _first_line(text))
     return WebkitError("internal", f"{name}: {_first_line(text)}")
+
+
+def human_required(url: str, message: str) -> WebkitError:
+    return WebkitError(
+        "human_required", message, url=url,
+        hint=("needs a person; you cannot pass it. Do not retry or wait: report the URL as not accessible "
+              "and continue. If the user is present they can open it in the backend browser via noVNC "
+              "and pass it there; passes can expire within ~30 minutes."),
+    )
+
+
+def blocked(url: str, message: str) -> WebkitError:
+    return WebkitError(
+        "blocked", message, url=url,
+        hint=("the site refuses this server (IP-level block); nobody can pass it from here. Do not retry: "
+              "use another source (arXiv, PubMed Central, the publisher's open copy, Semantic Scholar) "
+              "or report the URL as not accessible."),
+    )
 
 
 def _first_line(text: str) -> str:

@@ -5,7 +5,9 @@ Two strategies, ported from web-kit v1's client-side `file` command:
      included, streamed in chunks (low memory). Preferred.
   2. Fetch interception + Page.navigate: for resources that only load as a real
      navigation (some CSP / challenge flows). Buffers the body.
-A CAPTCHA/login wall surfaces as error class human_required, never as a "file".
+A CAPTCHA/login wall surfaces as error class human_required (a hard refusal of
+this server as blocked), never as a "file". A web page with a paper PDF behind it
+(citation_pdf_url) resolves to that PDF; any other web page is not_a_file.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ from fastapi import APIRouter, Query
 from fastapi.responses import StreamingResponse
 
 from . import browser, settings
-from .errors import WebkitError, classify
+from .errors import WebkitError, blocked, classify, human_required
 
 logger = logging.getLogger("webkit.download")
 router = APIRouter()
@@ -37,6 +39,23 @@ HUMAN_MARKERS = ("recaptcha", "g-recaptcha", "verify you are human", "unusual tr
                  "complete the check below", "attention required", "enable javascript and cookies",
                  "请稍候", "正在验证", "是否是真人",
                  "cookies must be enabled")  # Cloudflare in a zh-CN browser
+# Refusals no person can get past from this server (IP reputation / bans).
+BLOCK_MARKERS = ("you have been blocked", "error 1020", "error 1005", "error 1006", "error 1009",
+                 "the owner of this website has banned", "you don't have permission to access")
+_DATADOME_BAN = re.compile(r"""['"]t['"]\s*:\s*['"]bv['"]""")
+
+
+def wall_kind(text: str, html: str = "") -> str | None:
+    """'blocked', 'human' or None for the start of a page (visible text and/or markup)."""
+    h = html[:20000].lower()
+    if "captcha-delivery.com" in h:  # DataDome: 't':'bv' is a ban, otherwise a solvable CAPTCHA
+        return "blocked" if _DATADOME_BAN.search(h) else "human"
+    head = text[:8192].lower()
+    if any(m in head for m in BLOCK_MARKERS):
+        return "blocked"
+    if any(m in head for m in HUMAN_MARKERS):
+        return "human"
+    return None
 
 
 @dataclass
@@ -80,11 +99,24 @@ def _decode(body: dict) -> bytes:
         return data.encode("latin-1")
 
 
-def looks_like_human_wall(content_type: str, head: bytes) -> bool:
+_SCRIPT_STYLE = re.compile(r"<(script|style)\b.*?</\1\s*>", re.I | re.S)
+
+
+def body_wall_kind(content_type: str, head: bytes, total: int | None = None) -> str | None:
+    """Wall check on raw HTML. Interstitials are small; a full article page that merely
+    loads a CAPTCHA script for its login form is not one."""
     if "html" not in content_type:
-        return False
-    text = head[:8192].decode("utf-8", errors="ignore").lower()
-    return any(m in text for m in HUMAN_MARKERS)
+        return None
+    raw = head[:200000].decode("utf-8", errors="ignore")
+    if "captcha-delivery.com" in raw[:20000].lower():
+        return wall_kind("", raw)
+    if (total or len(head)) > 150_000:
+        return None
+    return wall_kind(_SCRIPT_STYLE.sub(" ", raw))
+
+
+def looks_like_human_wall(content_type: str, head: bytes) -> bool:
+    return body_wall_kind(content_type, head) is not None
 
 
 async def fetch(url: str, max_bytes: int) -> Fetched:
@@ -98,7 +130,7 @@ async def fetch(url: str, max_bytes: int) -> Fetched:
         try:
             fetched = await _via_stream(url)
         except WebkitError as e:
-            if e.error in ("human_required", "too_large", "busy"):
+            if e.error in ("human_required", "blocked", "too_large", "busy"):
                 raise
             logger.info("stream strategy failed for %s (%s); trying navigation", url, e.message)
             fetched = await _via_navigate(url)
@@ -109,13 +141,12 @@ async def fetch(url: str, max_bytes: int) -> Fetched:
     if fetched.length is not None and fetched.length > max_bytes:
         await fetched.close()
         raise WebkitError("too_large", f"{fetched.length} bytes exceeds the {max_bytes} byte limit")
-    if looks_like_human_wall(fetched.content_type, fetched.first):
+    kind = body_wall_kind(fetched.content_type, fetched.first, fetched.length)
+    if kind:
         await fetched.close()
-        raise WebkitError(
-            "human_required", "the site answered with a CAPTCHA / verification page",
-            hint=f"solve it once with `webkit browser open '{url}'` (noVNC), then retry",
-            url=url,
-        )
+        if kind == "blocked":
+            raise blocked(url, "the site refuses this server (block page instead of the file)")
+        raise human_required(url, "the site answered with a CAPTCHA / verification page")
     return fetched
 
 
@@ -264,10 +295,39 @@ def filename_for(fetched: Fetched) -> str:
     return name[:200]
 
 
-@router.get("/v2/download")
-async def download(url: str = Query(..., min_length=8), max_mb: int = Query(0, ge=0)):
-    limit = max_mb * 1024 * 1024 if max_mb else settings.DOWNLOAD_MAX_BYTES
+def _is_web_page(fetched: Fetched) -> bool:
+    return "html" in fetched.content_type and fetched.first[:5] != b"%PDF-"
+
+
+async def fetch_file(url: str, limit: int, allow_html: bool = False) -> tuple[Fetched, str | None]:
+    """Like fetch(), but a web page resolves to the paper PDF it links (citation_pdf_url).
+    Returns (fetched, landing page URL if resolved)."""
     fetched = await fetch(url, limit)
+    if allow_html or not _is_web_page(fetched):
+        return fetched, None
+    await fetched.close()
+    from .page import find_pdf_url  # page imports this module
+
+    pdf_url = await find_pdf_url(url)
+    if not pdf_url or pdf_url == url:
+        raise WebkitError(
+            "not_a_file", "this URL is a web page, not a file, and it links no PDF (citation_pdf_url)",
+            hint="for its text use `webkit read URL`; for a file pass the file's own link "
+                 "(find it with `webkit read -f links URL`)", url=url)
+    fetched = await fetch(pdf_url, limit)
+    if _is_web_page(fetched):
+        await fetched.close()
+        raise WebkitError("not_a_file", f"the page's PDF link returned a web page: {pdf_url}",
+                          hint="the publisher may need a login or show a viewer; try `webkit read --pdf URL`",
+                          url=url, pdf_url=pdf_url)
+    return fetched, url
+
+
+@router.get("/v2/download")
+async def download(url: str = Query(..., min_length=8), max_mb: int = Query(0, ge=0),
+                   allow_html: bool = Query(False)):
+    limit = max_mb * 1024 * 1024 if max_mb else settings.DOWNLOAD_MAX_BYTES
+    fetched, landing = await fetch_file(url, limit, allow_html)
 
     async def body() -> AsyncIterator[bytes]:
         sent = len(fetched.first)
@@ -290,6 +350,8 @@ async def download(url: str = Query(..., min_length=8), max_mb: int = Query(0, g
         "X-Webkit-Strategy": fetched.strategy,
         "X-Webkit-Upstream-Status": str(fetched.status),
     }
+    if landing:
+        headers["X-Webkit-Resolved-From"] = quote(landing, safe=":/?&=%#")
     if fetched.length is not None and not fetched.headers.get("content-encoding"):
         headers["Content-Length"] = str(fetched.length)  # IO.read yields decoded bytes
     return StreamingResponse(body(), media_type=fetched.content_type, headers=headers)

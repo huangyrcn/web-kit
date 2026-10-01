@@ -1,22 +1,26 @@
-"""webkit — search, read, crawl and download the web through a self-hosted,
-logged-in browser (web-kit v2 backend).
+"""webkit — fallback web access for agents, through a real, logged-in Chrome on a
+server (web-kit v2 backend).
 
-Output is compact text for agents and humans; --json gives the raw API response.
-Errors go to stderr as one JSON line: {"error": <class>, "message": ..., "hint": ...}.
+Output is compact text for agents and humans; --json changes the format, never the
+amount. Every command prints at most --max-chars characters (default 4000): page text
+beyond that is saved to a file and only its path is printed. Errors go to stderr as one
+JSON line: {"error": <class>, "message": ..., "hint": ...}; the hint says what to do next.
 
 Exit codes:
   0 ok (possibly after engine fallback; the header line says which engine answered)
   1 usage error            2 no results (engines healthy)
-  3 failed (engines / network / upstream / timeout)
+  3 failed (engines / network / upstream / timeout / not a file): retry once at most
   4 auth (missing or wrong key)        5 backend unreachable
-  6 human action needed (CAPTCHA / login: solve it via noVNC, then retry)
-  7 busy (all browser pages in use; retry shortly)
+  6 a person is needed (CAPTCHA / login): do not retry; report the URL as not accessible
+  7 busy (all browser pages in use): retry in a minute
+  8 blocked (the site refuses this server): do not retry; use another source
 """
 
 from __future__ import annotations
 
 import argparse
 import getpass
+import hashlib
 import json
 import os
 import re
@@ -27,26 +31,135 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from . import API_VERSION, __version__, config
-from .client import (EXIT_AUTH, EXIT_FAILED, EXIT_HUMAN, EXIT_NO_RESULTS, EXIT_OK, EXIT_UNREACHABLE,
-                     EXIT_USAGE, ApiError, Client)
+from .client import (EXIT_FAILED, EXIT_NO_RESULTS, EXIT_OK, EXIT_USAGE, ApiError, Client)
 
 PROFILES = ("general", "academic", "code", "community")
 TIME_RANGES = ("day", "week", "month", "year")
-INLINE_READ_CHARS = 3000
+DEFAULT_BUDGET = 4000   # chars a content command prints (search / read / crawl / download)
+MAX_BUDGET = 20000      # hard ceiling for --max-chars; full text only ever goes to files
+DIAG_BUDGET = 20000     # status / doctor / engines
+NOTE_RESERVE = 300      # room kept for each "saved to ..." line
+ERR_LINE_MAX = 2000
 
 
-# ─── output helpers ────────────────────────────────────────────────────────────
+# ─── output: one budget per command ───────────────────────────────────────────
+
+class Output:
+    """Everything a command prints to stdout goes through here. Past the budget, the
+    output continues in a spill file (holding the full output) and one note says where."""
+
+    def __init__(self) -> None:
+        self.limit: int | None = None
+        self.used = 0
+        self.cmd = "webkit"
+        self._printed: list[str] = []
+        self._spill = None
+        self.spill_path: Path | None = None
+
+    def configure(self, limit: int | None, cmd: str) -> None:
+        self.limit, self.used, self.cmd = limit, 0, cmd
+        self._printed, self._spill, self.spill_path = [], None, None
+
+    def remaining(self) -> int:
+        return 10**12 if self.limit is None else max(0, self.limit - self.used)
+
+    def write(self, text: str) -> None:
+        if not text.endswith("\n"):
+            text += "\n"
+        if self._spill is not None:
+            self._spill.write(text)
+            return
+        if self.limit is None or len(text) <= self.remaining():
+            sys.stdout.write(text)
+            self.used += len(text)
+            if self.limit is not None:
+                self._printed.append(text)
+            return
+        head = text[: self.remaining()]
+        sys.stdout.write(head + ("" if head.endswith("\n") else "\n"))
+        self.used = self.limit
+        self.spill_path = _cache_file("output", f"{self.cmd}-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}", ".txt")
+        self._spill = self.spill_path.open("w", encoding="utf-8")
+        self._spill.write("".join(self._printed) + text)
+
+    def note(self, text: str) -> None:
+        """An essential short line (a saved-file pointer): printed even at the budget."""
+        sys.stdout.write(text + "\n")
+        self.used += len(text) + 1
+
+    def close(self) -> None:
+        if self._spill is not None:
+            self._spill.close()
+            size = self.spill_path.stat().st_size
+            self.note(f"[output stopped at {self.limit} chars; the full output ({size} bytes) is in "
+                      f"{self.spill_path}: search it (grep -n) and read only the lines you need]")
+            self._spill = None
+
+
+OUT = Output()
+
 
 def out(text: str = "") -> None:
-    sys.stdout.write(text + ("\n" if not text.endswith("\n") else ""))
+    OUT.write(text)
 
 
 def err_json(body: dict) -> None:
-    sys.stderr.write(json.dumps(body, ensure_ascii=False) + "\n")
+    line = json.dumps(body, ensure_ascii=False)
+    if len(line) > ERR_LINE_MAX:
+        slim = {k: (v[:500] if isinstance(v, str) else v) for k, v in body.items()
+                if k in ("error", "message", "hint", "url", "status", "vnc", "classes")}
+        line = json.dumps(slim, ensure_ascii=False)[:ERR_LINE_MAX]
+    sys.stderr.write(line + "\n")
 
 
-def print_json(data) -> None:
-    out(json.dumps(data, ensure_ascii=False, indent=2))
+def print_json(data, summary: dict | None = None, shrink=()) -> None:
+    """JSON that fits the budget is printed as is. Larger JSON is saved to a file, then
+    printed compact, then through each `shrink` step (e.g. shorter snippets) with a
+    "full_json" pointer; if nothing fits, a small valid stub points at the file."""
+    text = json.dumps(data, ensure_ascii=False, indent=2)
+    if len(text) + 1 <= OUT.remaining():
+        out(text)
+        return
+    path = _cache_file("output", f"{OUT.cmd}-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}", ".json")
+    path.write_text(text, encoding="utf-8")
+    candidate = data
+    for step in (None, *shrink):
+        if step is not None:
+            candidate = step(candidate)
+        marked = {**candidate, "full_json": str(path)} if isinstance(candidate, dict) else candidate
+        compact = json.dumps(marked, ensure_ascii=False, separators=(",", ":"))
+        if len(compact) + 1 <= OUT.remaining():
+            out(compact)
+            return
+    OUT.note(json.dumps({"truncated": True, "saved_to": str(path), "chars": len(text), "summary": summary or {}},
+                        ensure_ascii=False))
+
+
+def _snippets(limit: int):
+    """A shrink step for search JSON: snippets cut to `limit` chars (0 drops them)."""
+    def step(data: dict) -> dict:
+        results = []
+        for r in data.get("results", []):
+            short = {k: v for k, v in r.items() if k != "snippet"}
+            if limit and r.get("snippet"):
+                short["snippet"] = r["snippet"][:limit]
+            results.append(short)
+        return {**data, "results": results}
+    return step
+
+
+def _cache_file(kind: str, stem: str, ext: str) -> Path:
+    d = config.cache_dir() / kind
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"{stem}{ext}"
+
+
+def _budget(args) -> int | None:
+    default = getattr(args, "default_budget", None)
+    asked = getattr(args, "max_chars", None)
+    if default is None:
+        return None
+    return min(asked if asked and asked > 0 else default, MAX_BUDGET)
 
 
 def engines_header(report: list[dict]) -> str:
@@ -69,6 +182,21 @@ def slugify(text: str, fallback: str = "page") -> str:
     return (s[:60] or fallback).strip("-") or fallback
 
 
+_DOI = re.compile(r"^(?:doi:\s*)?(10\.\d{4,9}/\S+)$", re.I)
+_ARXIV = re.compile(r"^arxiv:\s*([a-z\-]+(?:\.[a-z]{2})?/\d{7}|\d{4}\.\d{4,5})(v\d+)?$", re.I)
+
+
+def normalize_target(text: str) -> str:
+    """URLs pass through; a DOI (10.x/y, doi:10.x/y) becomes https://doi.org/..., an
+    arXiv ID (arXiv:2403.01092) its abstract page."""
+    t = text.strip()
+    if m := _DOI.match(t):
+        return "https://doi.org/" + m.group(1)
+    if m := _ARXIV.match(t):
+        return f"https://arxiv.org/abs/{m.group(1)}{m.group(2) or ''}"
+    return t
+
+
 def _ext(fmt: str) -> str:
     return {"html": ".html", "json": ".json", "links": ".tsv"}.get(fmt, ".md")
 
@@ -83,16 +211,22 @@ def cmd_search(args, client: Client) -> int:
         params["profile"] = args.profile
     data = client.get_json("/v2/search", params, timeout=args.timeout or 150)
     results = data.get("results", [])
-    if args.json and not args.read:
-        print_json(data)
-        return EXIT_OK if results else EXIT_NO_RESULTS
+    code = EXIT_OK if results else EXIT_NO_RESULTS
+    targets = [r["url"] for r in results[: args.read or 0]]
+    if args.json:
+        if targets:  # pages go to files; JSON lists them, never their text
+            read_code, data["pages"] = _read_many(client, targets, "fit", args.output, 60, as_json=True,
+                                                  to_files=True)
+            code = code or read_code
+        print_json(data, summary={"results": len(results)}, shrink=(_snippets(100), _snippets(0)))
+        return code
 
     header = engines_header(data.get("engines", []))
     if args.urls:
         sys.stderr.write(header + "\n")
         for r in results:
             out(r["url"])
-    elif not args.json:
+    else:
         out(header)
         for r in results:
             line = f"{r['rank']}. {r['title']}"
@@ -103,21 +237,17 @@ def cmd_search(args, client: Client) -> int:
             if r.get("snippet"):
                 snippet = r["snippet"]
                 out("   " + (snippet[:200] + "…" if len(snippet) > 200 else snippet))
-    if not results:
-        return EXIT_NO_RESULTS
-    if args.read:
-        targets = [r["url"] for r in results[: args.read]]
-        return _read_many(client, targets, fmt="fit", output=args.output,
-                          max_chars=args.max_chars if args.max_chars is not None else
-                          (0 if args.output else INLINE_READ_CHARS),
-                          timeout=60, as_json=args.json)
-    return EXIT_OK
+    if targets:
+        code = _read_many(client, targets, "fit", args.output, 60, to_files=True)[0] or code
+    return code
 
 
-def _page(client: Client, url: str, fmt: str, max_chars: int, timeout: int, wait_for=None,
-          scroll=False, cache=False) -> dict:
-    body = {"url": url, "format": fmt, "max_chars": max_chars, "timeout": timeout,
+def _page(client: Client, url: str, fmt: str, timeout: int, wait_for=None, scroll=False, cache=False,
+          pdf=False) -> dict:
+    body = {"url": url, "format": fmt, "max_chars": 0, "timeout": timeout,
             "wait_for": wait_for, "scroll": scroll, "cache": cache}
+    if pdf:
+        body["pdf"] = True
     return client.post_json("/v2/page", {k: v for k, v in body.items() if v is not None},
                             timeout=timeout + 45)
 
@@ -130,46 +260,92 @@ def _page_text(page: dict) -> str:
     return page.get("content", "")
 
 
-def _read_many(client: Client, urls: list[str], fmt: str, output: str | None, max_chars: int,
-               timeout: int, as_json: bool = False, **page_kw) -> int:
+def _page_path(output: str | None, single_file: bool, i: int, url: str, page: dict, fmt: str) -> Path:
+    if output and single_file:
+        return Path(output)
+    name = slugify(page.get("title") or urlparse(url).path.rsplit("/", 1)[-1] or urlparse(url).netloc)
+    if output:
+        return Path(output) / f"{i:02d}-{name}{_ext(fmt)}"
+    digest = hashlib.sha1(f"{url}|{fmt}".encode()).hexdigest()[:8]
+    return _cache_file("pages", f"{name}-{digest}", _ext(fmt))
+
+
+def _cut(text: str, limit: int) -> str:
+    """At most `limit` chars, ending at a line break when one is reasonably close."""
+    if len(text) <= limit:
+        return text
+    cut = text.rfind("\n", 0, limit)
+    return text[: cut if cut > limit // 2 else limit]
+
+
+def _read_many(client: Client, urls: list[str], fmt: str, output: str | None, timeout: int,
+               as_json: bool = False, to_files: bool = False, **page_kw) -> tuple[int, list[dict]]:
+    """Read pages under the command's output budget. With -o (or to_files) every page goes
+    to a file and only a manifest is printed. Otherwise a page that fits the budget is
+    printed and a longer one is saved to the cache with a preview. Returns (exit code,
+    one manifest entry per page); with as_json nothing is printed and the caller prints
+    the entries."""
     code = EXIT_OK
-    single_file = output and len(urls) == 1 and not output.endswith("/") and not Path(output).is_dir()
-    collected = []
+    single_file = bool(output) and len(urls) == 1 and not output.endswith("/") and not Path(output).is_dir()
+    to_files = to_files or bool(output)
+    pages = []
     for i, url in enumerate(urls, 1):
         try:
-            page = _page(client, url, fmt, max_chars, timeout, **page_kw)
+            page = _page(client, url, fmt, timeout, **page_kw)
         except ApiError as e:
             err_json({**e.body, "url": url})
             code = code or e.exit_code
             continue
-        collected.append(page)
-        text = _page_text(page)
-        if output:
-            if single_file:
-                path = Path(output)
-            else:
-                Path(output).mkdir(parents=True, exist_ok=True)
-                name = slugify(page.get("title") or urlparse(url).path.rsplit("/", 1)[-1] or urlparse(url).netloc)
-                path = Path(output) / f"{i:02d}-{name}{_ext(fmt)}"
+        pages.append((i, url, page, _page_text(page)))
+
+    entries = []
+    for k, (i, url, page, text) in enumerate(pages):
+        title = page.get("title") or ""
+        meta = {"url": url, **{f: page[f] for f in ("final_url", "title", "kind", "pages", "pdf_url")
+                               if page.get(f) not in (None, "")}, "chars": len(text)}
+        if to_files:
+            path = _page_path(output, single_file, i, url, page, fmt)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text, encoding="utf-8")
-            note = " (truncated)" if page.get("truncated") else ""
-            out(f"saved {path} ({len(text)} chars{note}) {page.get('title', '')}".rstrip())
-        elif not as_json:
-            if len(urls) > 1:
-                out(f"\n--- [{i}] {url}" + (f"  {page['title']}" if page.get("title") else ""))
-            out(text)
-            if page.get("truncated"):
-                out(f"\n[truncated at {len(text)} chars; use --max-chars 0 or -o FILE for the full page]")
-    if as_json:
-        print_json(collected if len(urls) > 1 else (collected[0] if collected else {}))
-    return code
+            meta["path"] = str(path)
+            if not as_json:
+                out(f"saved {path} ({len(text)} chars) {title}".rstrip())
+            entries.append(meta)
+            continue
+        room = max(0, OUT.remaining() - NOTE_RESERVE * (len(pages) - k))
+        header = (f"--- [{i}] {url}" + (f"  {title}" if title else "")) if len(urls) > 1 else ""
+        if as_json:
+            room = int(max(0, room - len(json.dumps(meta, ensure_ascii=False)) - 80) * 0.9)  # escaping
+        if len(text) + len(header) + 2 <= room:
+            if as_json:
+                meta["content"] = text
+            else:
+                if header:
+                    out(header)
+                out(text)
+        else:
+            path = _page_path(None, False, i, url, page, fmt)
+            path.write_text(text, encoding="utf-8")
+            preview = _cut(text, max(0, room - len(header) - 2))
+            meta.update(content=preview, truncated=True, path=str(path))
+            if not as_json:
+                if header:
+                    out(header)
+                if preview:
+                    out(preview)
+                OUT.note(f"[{len(preview)} of {len(text)} chars shown; the full text is in {path}: "
+                         "find the part you need (grep -n 'term' FILE) and read only those lines]")
+        entries.append(meta)
+    return code, entries
 
 
 def cmd_read(args, client: Client) -> int:
-    max_chars = args.max_chars if args.max_chars is not None else 0
-    return _read_many(client, args.urls, args.format, args.output, max_chars, args.timeout or 60,
-                      as_json=args.json, wait_for=args.wait_for, scroll=args.scroll, cache=args.cache)
+    urls = [normalize_target(u) for u in args.urls]
+    code, entries = _read_many(client, urls, args.format, args.output, args.timeout or 60, as_json=args.json,
+                               wait_for=args.wait_for, scroll=args.scroll, cache=args.cache, pdf=args.pdf)
+    if args.json:
+        print_json(entries if len(urls) > 1 else (entries[0] if entries else {}), summary={"pages": len(entries)})
+    return code
 
 
 def cmd_crawl(args, client: Client) -> int:
@@ -177,9 +353,6 @@ def cmd_crawl(args, client: Client) -> int:
             "max_pages": args.max_pages, "include": args.include or [], "exclude": args.exclude or [],
             "format": args.format, "timeout": args.timeout or 180}
     data = client.post_json("/v2/crawl", body, timeout=body["timeout"] + 60)
-    if args.json:
-        print_json(data)
-        return EXIT_OK if data.get("count") else EXIT_NO_RESULTS
     outdir = Path(args.output)
     outdir.mkdir(parents=True, exist_ok=True)
     index = []
@@ -188,19 +361,26 @@ def cmd_crawl(args, client: Client) -> int:
         if "content" in page:
             name = f"{i:02d}-{slugify(page.get('title') or urlparse(page['url']).path.rsplit('/', 1)[-1] or 'index')}.md"
             (outdir / name).write_text(page["content"], encoding="utf-8")
-            entry.update(file=name, chars=page.get("chars"))
-            out(f"saved {outdir / name} ({page.get('chars', 0)} chars) {page['url']}")
+            entry.update(file=name, chars=len(page["content"]))
         else:
             entry.update(error=page.get("error"), message=page.get("message"))
-            out(f"failed {page['url']}: {page.get('error')}")
         index.append(entry)
     (outdir / "index.json").write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
-    out(f"# crawled {data.get('count', 0)} pages -> {outdir}/index.json")
+    if args.json:
+        print_json({"url": data.get("url"), "count": data.get("count", 0), "dir": str(outdir), "pages": index},
+                   summary={"count": data.get("count", 0), "dir": str(outdir)})
+    else:
+        for e in index:
+            out(f"saved {outdir / e['file']} ({e['chars']} chars) {e['url']}" if "file" in e
+                else f"failed {e['url']}: {e.get('error')}")
+        OUT.note(f"# crawled {data.get('count', 0)} pages -> {outdir}/index.json")
     return EXIT_OK if any("file" in e for e in index) else EXIT_FAILED
 
 
-def _download_once(client: Client, url: str, dest: Path | None, max_mb: int) -> Path:
-    resp = client.stream("/v2/download", {"url": url, "max_mb": max_mb or None}, timeout=180)
+def _download_once(client: Client, url: str, dest: Path | None, max_mb: int, allow_html: bool = False,
+                   as_json: bool = False) -> Path:
+    resp = client.stream("/v2/download", {"url": url, "max_mb": max_mb or None, "allow_html": allow_html},
+                         timeout=180)
     with resp:
         name = unquote(resp.headers.get("X-Webkit-Filename") or "") or "download"
         target = dest if dest is not None and not (dest.is_dir() or str(dest).endswith("/")) \
@@ -224,17 +404,25 @@ def _download_once(client: Client, url: str, dest: Path | None, max_mb: int) -> 
                 os.unlink(tmp)
             raise
         ctype = resp.headers.get("Content-Type", "")
-    out(f"saved {target} ({size} bytes, {ctype})")
+        landing = unquote(resp.headers.get("X-Webkit-Resolved-From") or "")
+        final = unquote(resp.headers.get("X-Webkit-Final-Url") or "")
+    if as_json:
+        print_json({"path": str(target), "bytes": size, "content_type": ctype, "final_url": final,
+                    **({"resolved_from": landing} if landing else {})})
+    else:
+        note = f"; the PDF linked from the page: {final}" if landing else ""
+        out(f"saved {target} ({size} bytes, {ctype}{note})")
     return target
 
 
 def cmd_download(args, client: Client) -> int:
     dest = Path(args.output).expanduser() if args.output else None
+    url = normalize_target(args.url)
     deadline = time.monotonic() + args.wait_timeout
     opened = False
     while True:
         try:
-            _download_once(client, args.url, dest, args.max_mb)
+            _download_once(client, url, dest, args.max_mb, args.allow_html, args.json)
             return EXIT_OK
         except ApiError as e:
             if e.error != "human_required" or not args.wait_human:
@@ -242,7 +430,7 @@ def cmd_download(args, client: Client) -> int:
                     e.body.setdefault("vnc", client.cfg.vnc)
                 raise
             if not opened:
-                _open_for_human(client, args.url)
+                _open_for_human(client, url)
                 opened = True
             if time.monotonic() > deadline:
                 raise ApiError("human_required", f"still blocked after {args.wait_timeout}s",
@@ -356,13 +544,6 @@ def cmd_doctor(args, client: Client) -> int:
     return code
 
 
-def cmd_browser_open(args, client: Client) -> int:
-    client.get_json("/v2/admin/open", {"url": args.url}, admin=True, timeout=60)
-    out(f"opened {args.url} in the backend browser")
-    out(f"interact via noVNC: {client.cfg.vnc}  (user webkit, password = admin key)")
-    return EXIT_OK
-
-
 def cmd_config(args, _client) -> int:
     if args.config_cmd == "path":
         out(str(config.config_path()))
@@ -377,7 +558,7 @@ def cmd_config(args, _client) -> int:
         return EXIT_OK
     key = args.key.replace("-", "_")
     if key not in config.KEYS:
-        raise ApiError("invalid_request", f"unknown key '{args.key}'; one of: url, api-key, admin-key, vnc-url")
+        raise ApiError("invalid_request", f"unknown key '{args.key}'; one of: {', '.join(CONFIG_KEYS)}")
     if key.endswith("_key"):
         if args.value:
             raise ApiError("invalid_request", "pass keys on stdin, not as an argument (shell history)")
@@ -392,16 +573,17 @@ def cmd_config(args, _client) -> int:
 
 
 def cmd_skill(args, _client) -> int:
-    from .skill import render
+    from .skill import render, render_reference
 
-    text = render(build_parser())
+    parser = build_parser()
     if args.skill_cmd == "show":
-        out(text)
+        out(render_reference(parser) if args.reference else render(parser))
         return EXIT_OK
-    target = Path(args.dir).expanduser()
+    target = Path(args.dir or SKILL_DIRS[args.agent]).expanduser()
     target.mkdir(parents=True, exist_ok=True)
-    (target / "SKILL.md").write_text(text, encoding="utf-8")
-    out(f"installed {target / 'SKILL.md'} (webkit {__version__})")
+    (target / "SKILL.md").write_text(render(parser), encoding="utf-8")
+    (target / "reference.md").write_text(render_reference(parser), encoding="utf-8")
+    out(f"installed {target}/SKILL.md and reference.md (webkit {__version__})")
     return EXIT_OK
 
 
@@ -414,23 +596,48 @@ class _Parser(argparse.ArgumentParser):
         sys.exit(EXIT_USAGE)
 
 
+CONFIG_KEYS = ("url", "api-key", "admin-key", "vnc-url")
+SKILL_DIRS = {"claude": "~/.claude/skills/web-kit", "codex": "~/.codex/skills/web-kit"}
+
+POSITIONING = """\
+Fallback web access for agents, through a real, logged-in Chrome on a server.
+Use it when the built-in web tools fail, are blocked or out of quota, or cannot do
+the job; when they work, prefer them.
+
+  search    find URLs: raw result links + snippets, no answer; no WebSearch quota
+  read      learn what a page says: page / PDF / DOI / arXiv:ID -> text
+  download  get the file itself, saved to disk (a DOI or paper page -> its PDF)
+  crawl     a few pages of one site into a directory
+
+  status, doctor, engines, config, skill: health and setup
+
+Order: built-in tools -> search/read/download -> report "not accessible".
+"""
+
+
 def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     g = common.add_argument_group("connection")
     g.add_argument("--url", dest="backend_url", metavar="URL", help="backend URL (default: config / $WEBKIT_URL)")
     g.add_argument("--key", help=argparse.SUPPRESS)
     g.add_argument("--timeout", type=int, help="seconds to wait for the backend")
-    common.add_argument("--json", action="store_true", help="print the raw API response as JSON")
+    common.add_argument("--json", action="store_true", help="JSON output (same amount, different format)")
+    common.add_argument("--max-chars", type=int, metavar="N",
+                        help=f"most characters this command prints (default {DEFAULT_BUDGET}, at most "
+                        f"{MAX_BUDGET}); longer text goes to a file and its path is printed")
 
-    p = _Parser(prog="webkit", description="Search, read, crawl and download the web through the "
-                "web-kit backend (a logged-in Chrome).", epilog=__doc__.split("\n\n", 2)[2],
-                formatter_class=argparse.RawDescriptionHelpFormatter)
+    raw = argparse.RawDescriptionHelpFormatter
+    p = _Parser(prog="webkit", description=POSITIONING, epilog=__doc__.split("\n\n", 2)[2], formatter_class=raw)
     p.add_argument("--version", action="version", version=f"webkit {__version__} (api {API_VERSION})")
-    sub = p.add_subparsers(dest="cmd", required=True, parser_class=_Parser)
+    # Subcommands carry no help= so argparse does not list them a second time under POSITIONING.
+    sub = p.add_subparsers(dest="cmd", required=True, metavar="COMMAND", parser_class=_Parser)
 
-    s = sub.add_parser("search", parents=[common], help="search the web",
-                       description="Search with a profile (ordered engine fallback) or one engine. "
-                       "First line: '# engines <engine>=<ok:N|empty|error:CLASS|skipped> ...'.")
+    s = sub.add_parser("search", parents=[common], formatter_class=raw, description="""\
+Find URLs. Returns raw result links with snippets from live engines: no synthesized
+answer, and no WebSearch quota. Use it when WebSearch is out of quota or failing, or
+for a specific engine (Google Scholar, Semantic Scholar, arXiv) or a date filter.
+Then `webkit read` the results you need.
+First line: '# engines <engine>=<ok:N|empty|error:CLASS|skipped> ...'.""")
     s.add_argument("query", nargs="+")
     s.add_argument("-p", "--profile", choices=PROFILES, default="general",
                    help="engine chain: general=google>duckduckgo>bing, "
@@ -441,26 +648,48 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--time", choices=TIME_RANGES, help="recency filter; engines without it are skipped")
     s.add_argument("--lang", help="language, e.g. en, zh-CN")
     s.add_argument("--urls", action="store_true", help="print only result URLs (engine header on stderr)")
-    s.add_argument("--read", type=int, metavar="N", help="also read the top N results (fit markdown)")
+    s.add_argument("--read", type=int, metavar="N",
+                   help="also read the top N results into files (-o DIR, else the cache); prints their paths")
     s.add_argument("-o", "--output", metavar="DIR", help="with --read: save pages into DIR")
-    s.add_argument("--max-chars", type=int, help=f"with --read: cap per page (default {INLINE_READ_CHARS} inline, 0 = none)")
-    s.set_defaults(func=cmd_search)
+    s.set_defaults(func=cmd_search, default_budget=DEFAULT_BUDGET)
 
-    r = sub.add_parser("read", parents=[common], help="read pages (and PDFs) as markdown",
-                       description="Render URLs in the backend browser and return clean text. "
-                       "PDFs are detected and returned as extracted text.")
-    r.add_argument("urls", nargs="+", metavar="URL")
+    r = sub.add_parser("read", parents=[common], formatter_class=raw, description=f"""\
+Learn what a page says, as text. Use it when the built-in reader fails (403, 429,
+timeout, too large), returns a verification or login page, or gives a summary where
+you need the exact text (quotes, numbers, tables, a full paper).
+Targets: URLs, DOIs (10.1145/... or doi:...), arXiv IDs (arXiv:2403.01092 -> abstract page).
+PDFs come back as extracted text with '<!-- page N -->' markers; --pdf reads the PDF a
+paper page links instead of the page. A verification page is never returned as
+content: it is exit 6 (needs a person) or 8 (blocked).
+Output: a page that fits --max-chars is printed; a longer one is saved to a file and
+only a preview and the path are printed. With -o, only paths are printed.""")
+    r.add_argument("urls", nargs="+", metavar="TARGET")
+    r.add_argument("--pdf", action="store_true", help="read the paper PDF the page links (citation_pdf_url)")
     r.add_argument("-f", "--format", choices=("fit", "md", "html", "links", "json"), default="fit",
                    help="fit = main content (default), md = full page, html, links, json")
-    r.add_argument("-o", "--output", metavar="PATH", help="save to FILE (one URL) or DIR; prints one line per page")
+    r.add_argument("-o", "--output", metavar="PATH", help="save to FILE (one target) or DIR; prints one line per page")
     r.add_argument("--wait-for", metavar="CSS|MS", help="CSS selector to wait for, or milliseconds")
     r.add_argument("--scroll", action="store_true", help="scroll the full page first (lazy content)")
     r.add_argument("--cache", action="store_true", help="allow a cached copy (default: always fetch fresh)")
-    r.add_argument("--max-chars", type=int, help="truncate each page to N chars")
-    r.set_defaults(func=cmd_read)
+    r.set_defaults(func=cmd_read, default_budget=DEFAULT_BUDGET)
 
-    c = sub.add_parser("crawl", parents=[common], help="crawl a site into a directory",
-                       description="Bounded synchronous crawl; one markdown file per page plus index.json.")
+    d = sub.add_parser("download", parents=[common], formatter_class=raw, description=f"""\
+Get the file itself (PDF, archive, dataset), saved to disk through the backend
+browser, so its logins and cookies apply. Prints the saved path, not the content.
+Targets: URLs, DOIs, arXiv IDs. A paper page resolves to the PDF it links; any other
+web page is an error (not_a_file): use `read` for text.
+Default destination: {config.download_dir()}/ ($WEBKIT_DOWNLOAD_DIR).""")
+    d.add_argument("url", metavar="TARGET")
+    d.add_argument("-o", "--output", metavar="PATH", help="target file or directory")
+    d.add_argument("--max-mb", type=int, default=0, help="size limit in MB (default: backend limit)")
+    d.add_argument("--allow-html", action="store_true", help="save a web page as-is instead of resolving its PDF")
+    d.add_argument("--wait-human", action="store_true",
+                   help="only with a person at noVNC: open the page there and retry until they pass the check")
+    d.add_argument("--wait-timeout", type=int, default=300, help="seconds to wait with --wait-human (default 300)")
+    d.set_defaults(func=cmd_download, default_budget=DEFAULT_BUDGET)
+
+    c = sub.add_parser("crawl", parents=[common], formatter_class=raw, description="""\
+Bounded synchronous crawl of one site: one markdown file per page plus index.json.""")
     c.add_argument("url")
     c.add_argument("-o", "--output", required=True, metavar="DIR")
     c.add_argument("--strategy", choices=("bfs", "dfs"), default="bfs")
@@ -469,47 +698,34 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--include", action="append", metavar="GLOB", help="only URLs matching (repeatable)")
     c.add_argument("--exclude", action="append", metavar="GLOB", help="skip URLs matching (repeatable)")
     c.add_argument("-f", "--format", choices=("fit", "md"), default="fit")
-    c.set_defaults(func=cmd_crawl)
+    c.set_defaults(func=cmd_crawl, default_budget=DEFAULT_BUDGET)
 
-    d = sub.add_parser("download", parents=[common], help="download a file with the browser's cookies",
-                       description="Stream a file through the backend browser (its logins apply). "
-                       f"Default destination: {config.download_dir()}/ ($WEBKIT_DOWNLOAD_DIR).")
-    d.add_argument("url")
-    d.add_argument("-o", "--output", metavar="PATH", help="target file or directory")
-    d.add_argument("--max-mb", type=int, default=0, help="size limit in MB (default: backend limit)")
-    d.add_argument("--wait-human", action="store_true",
-                   help="on CAPTCHA/login: open the page in the backend browser and retry until solved")
-    d.add_argument("--wait-timeout", type=int, default=300, help="seconds to wait with --wait-human (default 300)")
-    d.set_defaults(func=cmd_download)
+    st = sub.add_parser("status", parents=[common], description="backend health: browser, egress, engines")
+    st.set_defaults(func=cmd_status, default_budget=DIAG_BUDGET)
+    dr = sub.add_parser("doctor", parents=[common], description="check config, keys, versions and backend health")
+    dr.set_defaults(func=cmd_doctor, default_budget=DIAG_BUDGET)
+    en = sub.add_parser("engines", parents=[common], description="list engines, profiles and time-filter support")
+    en.set_defaults(func=cmd_engines, default_budget=DIAG_BUDGET)
 
-    st = sub.add_parser("status", parents=[common], help="backend health: browser, egress, engines")
-    st.set_defaults(func=cmd_status)
-    en = sub.add_parser("engines", parents=[common], help="list engines, profiles and time-filter support")
-    en.set_defaults(func=cmd_engines)
-    dr = sub.add_parser("doctor", parents=[common], help="check config, auth, versions and backend health")
-    dr.set_defaults(func=cmd_doctor)
-
-    b = sub.add_parser("browser", help="admin: drive the backend browser (needs the admin key)")
-    bsub = b.add_subparsers(dest="browser_cmd", required=True, parser_class=_Parser)
-    bo = bsub.add_parser("open", parents=[common], help="open URL in the backend browser for a manual login/CAPTCHA via noVNC")
-    bo.add_argument("url")
-    bo.set_defaults(func=cmd_browser_open)
-
-    cf = sub.add_parser("config", help="show or change the CLI config")
+    cf = sub.add_parser("config", description="show or change the CLI config")
     csub = cf.add_subparsers(dest="config_cmd", required=True, parser_class=_Parser)
     csub.add_parser("show", help="effective settings and where each comes from").set_defaults(func=cmd_config)
     csub.add_parser("path", help="config file location").set_defaults(func=cmd_config)
     cs = csub.add_parser("set", help="set url / vnc-url (argument) or api-key / admin-key (stdin)")
-    cs.add_argument("key", choices=("url", "api-key", "admin-key", "vnc-url"))
+    cs.add_argument("key", choices=CONFIG_KEYS)
     cs.add_argument("value", nargs="?")
     cs.set_defaults(func=cmd_config)
 
-    sk = sub.add_parser("skill", help="agent skill for this CLI version")
+    sk = sub.add_parser("skill", description="agent skill (SKILL.md) for this CLI version")
     ssub = sk.add_subparsers(dest="skill_cmd", required=True, parser_class=_Parser)
-    si = ssub.add_parser("install", help="write SKILL.md (default ~/.claude/skills/web-kit)")
-    si.add_argument("--dir", default="~/.claude/skills/web-kit")
+    si = ssub.add_parser("install", help="write SKILL.md + reference.md for Claude Code (default) or Codex")
+    si.add_argument("--agent", choices=tuple(SKILL_DIRS), default="claude",
+                    help="claude -> ~/.claude/skills/web-kit, codex -> ~/.codex/skills/web-kit")
+    si.add_argument("--dir", help="write here instead")
     si.set_defaults(func=cmd_skill)
-    ssub.add_parser("show", help="print SKILL.md").set_defaults(func=cmd_skill)
+    sh = ssub.add_parser("show", help="print SKILL.md (or --reference: reference.md)")
+    sh.add_argument("--reference", action="store_true", help="print reference.md instead")
+    sh.set_defaults(func=cmd_skill)
     return p
 
 
@@ -518,6 +734,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     flags = {"url": getattr(args, "backend_url", None), "api_key": getattr(args, "key", None)}
     client = Client(config.load(flags))
+    OUT.configure(_budget(args), args.cmd)
     try:
         code = args.func(args, client)
     except ApiError as e:
@@ -527,6 +744,11 @@ def main(argv: list[str] | None = None) -> int:
         code = 130
     except BrokenPipeError:
         code = EXIT_OK
+    finally:
+        try:
+            OUT.close()
+        except BrokenPipeError:
+            pass
     sys.exit(code)
 
 

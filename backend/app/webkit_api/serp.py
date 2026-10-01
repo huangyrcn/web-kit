@@ -50,7 +50,7 @@ async def _render_in_slot(engine, url, parse, is_captcha, retries, goto_timeout)
             if (is_captcha is not None and is_captcha(page, content)) or _is_wall_response(resp, content):
                 last = WebkitError(
                     "captcha", f"{engine} served a CAPTCHA/challenge page",
-                    hint="solve it once via `webkit browser open <url>` (noVNC); cookies then persist",
+                    hint="this engine wants a person; another engine or profile, or WebSearch, may still answer",
                 )
                 logger.warning("%s: CAPTCHA (attempt %d/%d)", engine, attempt + 1, retries + 1)
             elif resp is not None and resp.status >= 400:
@@ -188,12 +188,19 @@ def google_is_captcha(page, content: str) -> bool:
     return "unusual traffic" in cl or "/sorry/" in page.url or "g-recaptcha" in cl
 
 
-async def google(q: str, limit: int, time_range: str | None = None, lang: str | None = None) -> list[dict]:
-    url = f"https://www.google.com/search?q={quote_plus(q)}&num={limit}&hl=en"
+def google_url(q: str, limit: int, time_range: str | None = None, lang: str | None = None) -> str:
+    # udm=14 is Google's plain "Web" tab: for some queries the default page is an
+    # AI Mode answer with no result links at all.
+    url = f"https://www.google.com/search?q={quote_plus(q)}&num={limit}&hl=en&udm=14"
     if time_range:
         url += f"&tbs={_GOOGLE_TBS[time_range]}"
     if lang:
         url += f"&lr=lang_{quote_plus(lang)}"
+    return url
+
+
+async def google(q: str, limit: int, time_range: str | None = None, lang: str | None = None) -> list[dict]:
+    url = google_url(q, limit, time_range, lang)
 
     async def parse(page) -> list[dict]:
         if not await _wait_results(page, "#search, #rso", "google",

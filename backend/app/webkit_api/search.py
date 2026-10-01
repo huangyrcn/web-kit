@@ -106,7 +106,8 @@ async def search(
             "engines_failed",
             "every engine failed: " + "; ".join(f"{r['engine']}={r['error']}" for r in tried),
             hint=("the backend lost its route out; see `webkit status`" if set(classes) <= {"network", "timeout"}
-                  else "an anti-bot check blocked the browser; solve it once via `webkit browser open URL` (noVNC)"
+                  else "anti-bot checks stopped every engine: use WebSearch or another profile; if the user is "
+                       "present they can pass the check in the backend browser via noVNC"
                   if set(classes) & {"captcha", "blocked", "human_required"}
                   else "see `webkit status` for engine health"),
             engines=report, classes=classes,

@@ -1,7 +1,8 @@
 """Where the backend is and which keys to send.
 
 Precedence: command-line flags > environment > config file > defaults.
-  env:  WEBKIT_URL, WEBKIT_API_KEY, WEBKIT_ADMIN_KEY, WEBKIT_VNC_URL, WEBKIT_DOWNLOAD_DIR
+  env:  WEBKIT_URL, WEBKIT_API_KEY, WEBKIT_ADMIN_KEY, WEBKIT_VNC_URL, WEBKIT_DOWNLOAD_DIR,
+        WEBKIT_CACHE_DIR
         (Claude plugin userConfig arrives as CLAUDE_PLUGIN_OPTION_URL / _API_KEY / _ADMIN_KEY)
   file: ~/.config/web-kit/config.toml  (or $WEBKIT_CONFIG), keys: url, api_key, admin_key, vnc_url
 """
@@ -29,6 +30,14 @@ def config_path() -> Path:
         return Path(os.environ["WEBKIT_CONFIG"]).expanduser()
     base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
     return base / "web-kit" / "config.toml"
+
+
+def cache_dir() -> Path:
+    """Where page text and long command output land (pages/, output/)."""
+    if os.environ.get("WEBKIT_CACHE_DIR"):
+        return Path(os.environ["WEBKIT_CACHE_DIR"]).expanduser()
+    base = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+    return base / "web-kit"
 
 
 def download_dir() -> Path:

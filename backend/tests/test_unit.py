@@ -242,3 +242,134 @@ def test_decode_handles_io_read_and_fetch_bodies():
     assert _decode({"data": base64.b64encode(b"%PDF-1").decode(), "base64Encoded": True}) == b"%PDF-1"
     assert _decode({"body": base64.b64encode(b"%PDF-2").decode(), "base64Encoded": True}) == b"%PDF-2"
     assert _decode({"body": "plain", "base64Encoded": False}) == b"plain"
+
+
+# ─── walls: a person can pass vs. this server is refused ──────────────────────
+
+DATADOME = ("<html><head><title>researchgate.net</title></head><body><script>var dd={'rt':'c','cid':'x',"
+            "'t':'%s','host':'geo.captcha-delivery.com'}</script></body></html>")
+
+
+@pytest.mark.parametrize("text,html,expected", [
+    ("", DATADOME % "bv", "blocked"),        # DataDome ban: no CAPTCHA is offered
+    ("", DATADOME % "fe", "human"),          # DataDome CAPTCHA a person can solve
+    ("Attention Required! | Cloudflare Sorry, you have been blocked", "", "blocked"),
+    ("Just a moment... Verify you are human", "", "human"),
+    ("请稍候… 正在进行安全验证", "", "human"),
+    ("Deep Residual Learning for Image Recognition. Abstract: deeper networks…", "", None),
+])
+def test_wall_kind(text, html, expected):
+    from webkit_api.download import wall_kind
+    assert wall_kind(text, html) == expected
+
+
+def test_page_wall_kind_reads_markup_of_empty_pages():
+    from webkit_api.page import page_wall_kind
+    assert page_wall_kind("researchgate.net", "", DATADOME % "bv") == "blocked"
+    assert page_wall_kind("Article", "x" * 5000) is None  # a long page is content
+
+
+def test_body_wall_kind_ignores_full_pages_with_captcha_scripts():
+    from webkit_api.download import body_wall_kind
+    article = ("<html><head><title>Paper</title><script src='https://www.google.com/recaptcha/api.js'></script>"
+               "</head><body>" + "<p>text</p>" * 20000 + "</body></html>").encode()
+    assert body_wall_kind("text/html", article) is None
+    small = b"<html><head><title>Just a moment...</title><script>var captcha=1</script></head><body></body></html>"
+    assert body_wall_kind("text/html", small) == "human"
+    assert body_wall_kind("application/pdf", b"%PDF-1.7 captcha") is None
+
+
+def test_error_builders_say_what_to_do():
+    h = errors.human_required("https://x/y", "challenge")
+    b = errors.blocked("https://x/y", "refused")
+    assert (h.error, h.status, b.error) == ("human_required", 409, "blocked")
+    assert "Do not retry" in h.hint and "not accessible" in h.hint and "Do not retry" in b.hint
+    assert errors.ERROR_STATUS["not_a_file"] == 422
+
+
+# ─── paper page -> PDF ─────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("html,expected", [
+    ('<meta name="citation_pdf_url" content="https://arxiv.org/pdf/2403.01092">', "https://arxiv.org/pdf/2403.01092"),
+    ("<meta content='/content/pdf/10.1007/x.pdf' name='citation_pdf_url'/>",
+     "https://link.springer.com/content/pdf/10.1007/x.pdf"),
+    ('<meta name="citation_pdf_url" content="https://openreview.net/pdf?id=A&amp;b=1">',
+     "https://openreview.net/pdf?id=A&b=1"),
+    ('<link rel="alternate" type="application/pdf" href="/doi/pdf/10.1/x">', "https://link.springer.com/doi/pdf/10.1/x"),
+    ("<meta name='citation_title' content='No PDF here'>", None),
+])
+def test_pdf_link(html, expected):
+    from webkit_api.page import pdf_link
+    assert pdf_link(f"<html><head>{html}</head></html>", "https://link.springer.com/article/x") == expected
+
+
+def test_to_markdown_fit_drops_skip_links_banners_and_hidden_text():
+    from webkit_api.page import to_markdown
+    body = ("<a class='c-skip-link' href='#main'>Skip to main content</a>"
+            "<div id='siteNotice'>The internet's changing. An important update for readers.</div>"
+            "<div hidden><span>在新窗口中打开</span><span>打开外部网站</span></div>"
+            "<main><h1>Knowledge graph</h1>" + "<p>A knowledge graph is a knowledge base that uses a graph "
+            "structured data model to represent entities and their relations in a domain.</p>" * 6 + "</main>")
+    text = to_markdown("https://en.wikipedia.org/wiki/K", f"<html><body>{body}</body></html>", True)[0]
+    assert "knowledge base" in text
+    for junk in ("Skip to", "internet's changing", "新窗口"):
+        assert junk not in text
+
+
+def test_google_asks_for_the_plain_web_tab():
+    url = serp.google_url("V*: guided search", 10, "year")
+    assert "udm=14" in url and "tbs=qdr:y" in url and "num=10" in url
+
+
+def _fetched(url, ctype, body):
+    async def nothing():
+        if False:
+            yield b""
+    return Fetched(url, 200, {"content-type": ctype, "content-length": str(len(body))}, "stream", body, nothing())
+
+
+@pytest.fixture
+def fake_files(monkeypatch):
+    from webkit_api import download, page
+    files = {"https://dl.acm.org/doi/10.1/x": ("text/html", b"<html>landing</html>"),
+             "https://dl.acm.org/doi/pdf/10.1/x": ("application/pdf", b"%PDF-1.7 paper"),
+             "https://blog.example/post": ("text/html", b"<html>post</html>")}
+    links = {"https://dl.acm.org/doi/10.1/x": "https://dl.acm.org/doi/pdf/10.1/x"}
+
+    async def fetch(url, limit):
+        return _fetched(url, *files[url])
+
+    async def find_pdf_url(url, timeout=60):
+        return links.get(url)
+
+    monkeypatch.setattr(download, "fetch", fetch)
+    monkeypatch.setattr(page, "find_pdf_url", find_pdf_url)
+    return files
+
+
+def test_download_resolves_a_paper_page_to_its_pdf(fake_files):
+    r = client.get("/v2/download", params={"url": "https://dl.acm.org/doi/10.1/x"})
+    assert r.status_code == 200 and r.content == b"%PDF-1.7 paper"
+    assert "dl.acm.org/doi/10.1/x" in r.headers["X-Webkit-Resolved-From"]
+
+
+def test_download_of_a_plain_web_page_is_not_a_file(fake_files):
+    r = client.get("/v2/download", params={"url": "https://blog.example/post"})
+    assert r.status_code == 422 and r.json()["error"] == "not_a_file" and "webkit read" in r.json()["hint"]
+    r = client.get("/v2/download", params={"url": "https://blog.example/post", "allow_html": "true"})
+    assert r.status_code == 200 and r.content == b"<html>post</html>"
+
+
+def test_read_pdf_without_a_pdf_link_is_not_found(monkeypatch):
+    from webkit_api import page
+
+    async def no(*a, **k):
+        return None
+
+    async def not_pdf(url):
+        return False
+
+    monkeypatch.setattr(page, "_is_pdf", not_pdf)
+    monkeypatch.setattr(page, "find_pdf_url", no)
+    r = client.post("/v2/page", json={"url": "https://blog.example/post", "pdf": True})
+    assert r.status_code == 404 and r.json()["error"] == "not_found"

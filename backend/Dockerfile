@@ -10,6 +10,10 @@ FROM mcr.microsoft.com/playwright/python:v1.52.0-noble
 
 # Pinned upstreams. Bump deliberately; the values are reported by /v2/version.
 ARG SEARXNG_REF=a9d99003344ac3879ec45c56c661283482a92a39
+# Chrome is pinned too: Cloudflare binds a pass (cf_clearance) to the browser, and an
+# unplanned upgrade (149 -> 154) voided every pass the profile held. Google keeps only
+# recent builds in its pool, so a stale pin fails the build loudly instead of drifting.
+ARG CHROME_VERSION=154.0.8037.92-1
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -22,12 +26,11 @@ RUN echo force-unsafe-io > /etc/dpkg/dpkg.cfg.d/docker-unsafe-io \
     && apt-get update && apt-get install -y --no-install-recommends \
         xvfb x11-utils x11vnc fluxbox novnc websockify \
         curl wget gnupg ca-certificates git supervisor tini python3-venv \
-    && wget -q -O - https://dl.google.com/linux/linux_signing_key.pub \
-       | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
-    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" \
-       > /etc/apt/sources.list.d/google-chrome.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends google-chrome-stable \
+        pulseaudio \
+    && wget -q -O /tmp/google-chrome.deb \
+       "https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_${CHROME_VERSION}_amd64.deb" \
+    && apt-get install -y --no-install-recommends /tmp/google-chrome.deb \
+    && rm -f /tmp/google-chrome.deb /etc/apt/sources.list.d/google-chrome.list \
     && rm -rf /var/lib/apt/lists/*
 
 # Caddy from its official image (its apt repo key has expired before).
@@ -55,7 +58,7 @@ COPY app/webkit_api /opt/webkit-app/webkit_api
 
 COPY Caddyfile /etc/caddy/Caddyfile
 COPY supervisord.conf /etc/supervisor/supervisord.conf
-COPY start-xvfb.sh start-chrome.sh start-searxng.sh start-vnc.sh start-caddy.sh watchdog.sh healthcheck.sh /usr/local/bin/
+COPY start-xvfb.sh start-pulse.sh start-chrome.sh start-searxng.sh start-vnc.sh start-caddy.sh watchdog.sh healthcheck.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/*.sh \
     && google-chrome-stable --version > /etc/webkit-chrome-version
 

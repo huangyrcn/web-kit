@@ -1,5 +1,6 @@
-"""SKILL.md generated from the CLI's own --help, so the skill an agent reads
-always matches the installed CLI version."""
+"""The agent skill, generated from the CLI so it always matches the installed version:
+SKILL.md (when and how to use web-kit) plus reference.md (every command's --help),
+which agents open only when they need an option."""
 
 from __future__ import annotations
 
@@ -9,69 +10,100 @@ from . import API_VERSION, __version__
 
 _HEADER = """---
 name: web-kit
-description: "web-kit (`webkit` CLI): the agents' self-hosted browser. Rule: WebSearch finds, web-kit reads. Use it to read a URL or PDF as full, unsummarized text (read this URL, what does this page say, full text, the paper at, this PDF, 读这个页面, 原文, 全文, 这篇论文), pages that need JavaScript or a login (paywalled, 需要登录), downloading files with the browser's cookies (download the file, 下载这篇), crawling a docs site, and searching specific engines: Google Scholar, Semantic Scholar, arXiv, Google, DuckDuckGo, GitHub (找论文, 学术检索). Also the search fallback once WebSearch reports its session budget is spent. Not for clicking or filling forms."
+description: "Fallback web access through a self-hosted, logged-in Chrome (`webkit` CLI), for when the built-in web tools fail or cannot do the job. Use when web search is out of quota or erroring (\\"Web search was not performed\\"); a page read fails (403, 429, timeout, too large, unsupported type) or returns a verification or login page instead of content (\\"Just a moment\\", \\"请稍候\\", \\"Verify you are human\\", reCAPTCHA, OpenReview or Cloudflare checks, a /challenge redirect, HTML where a PDF was expected); you need a page's exact full text or a PDF's text and the built-in reader only summarizes; you need the file itself (a paper PDF by URL, DOI or arXiv ID); or you need Google Scholar, Semantic Scholar or arXiv results. 读不了、被拦、验证页、下载论文 PDF、原文全文。 Not the default for search or reading; never for posting, submitting forms, purchases or account changes."
 ---
 
 # web-kit (`webkit` CLI {version}, API {api})
 
-**Rule: WebSearch finds, web-kit reads.** web-kit is a self-hosted, logged-in Chrome reached
-through the `webkit` CLI. It returns full, unsummarized text.
+Use the built-in web tools first (Claude Code: WebSearch / WebFetch; Codex: web search / open /
+find). web-kit takes over when they fail, are blocked or out of quota, or cannot do the job. It is
+a real Chrome on a server, logged in to the sites the user has passed once.
 
-## When to use
+## Which command
 
-- **Read**: whenever exact content matters (quotes, numbers, tables, a full paper or PDF) or the page
-  needs JavaScript or a login: `webkit read URL`. Prefer it over WebFetch, which returns a model summary.
-- **Find papers**: CS / ML: `webkit search -p academic "..."` (Semantic Scholar > Google Scholar >
-  OpenAlex > arXiv). Biomedical, or when you need DOIs, citation counts or PubMed: the `paper-search` CLI.
-- **General web search**: use WebSearch. If WebSearch answers with the "web search budget" notice,
-  switch to `webkit search` for the rest of the task and say so in your report.
-- **Files behind a login**: `webkit download URL`.
-- **Not for**: clicking, typing or filling forms.
+| You need | Command | You get |
+|---|---|---|
+| URLs for a topic (built-in search failed or is out of quota), or a specific engine | `webkit search "query"` (`-p academic` for papers) | ranked links + snippets, no answer; then `read` what you need |
+| What a page or PDF says | `webkit read TARGET -o page.md` | text (PDFs: extracted text with page markers) |
+| The paper PDF behind a paper page or DOI, as text | `webkit read --pdf TARGET -o paper.md` | the PDF's text |
+| The file itself (to keep, hand over, or process) | `webkit download TARGET` | the saved path; nothing printed from the content |
 
-Install / update: `uv tool install --force git+https://github.com/huangyrcn/web-kit` (then `webkit skill install`).
-When anything fails, run `webkit doctor` first.
+TARGET is a URL, a DOI (`10.1145/...`, `doi:...`) or `arXiv:ID`. Don't know the URL: `search`.
+Want to know what it says: `read`. Need the file: `download`.
+
+## When the built-in tools fail
+
+- A verification or login page is a failure even with HTTP 200: "Just a moment…", "请稍候…",
+  "Verify you are human", reCAPTCHA, a `/challenge` redirect, HTML where you asked for a PDF.
+  Stop using the built-in tool on that URL (no more open / find / fetch / curl on it) and run
+  `webkit read` or `webkit download` once.
+- Web search out of quota ("Web search was not performed") or erroring: use `webkit search` for
+  the rest of the task and say so in your report.
+- Claude Code's WebFetch returns a model summary: when exact text matters (quotes, numbers,
+  tables, a full paper), use `webkit read`.
+
+## When web-kit fails
+
+- Exit 6 (needs a person) or 8 (blocked): do not retry and do not wait. Report the URL as "not
+  accessible" and continue with other sources. (A person can pass exit-6 pages in noVNC; passes on
+  Cloudflare sites can expire within ~30 minutes.)
+- Exit 7 (busy): retry in a minute; do not start more parallel `webkit` calls.
+- Exit 3: retry once at most, then report. Exit 4 / 5: run `webkit doctor` and report.
+- Errors are one JSON line on stderr; its `hint` says what to do next.
+
+## Rules
+
+- Output is budgeted: a command prints at most 4000 chars (`--max-chars`, up to 20000). Longer
+  page text is saved to a file and the output gives its path (plus a preview for `read`); with
+  `-o` only paths are printed. `--json` changes the format, never the amount.
+- Read saved files selectively: `grep -n 'term' FILE` to locate the part you need, then read just
+  those lines. Never `cat` a whole page or paper into context.
+- `search` output starts with `# engines google=ok:8 duckduckgo=skipped ...`. `error:network` on
+  every engine means the backend lost its route out: say so, do not guess results.
+- One shared browser and one exit IP serve every agent: no bulk searching, few parallel calls.
 
 ## Typical use
 
 ```bash
-webkit read https://arxiv.org/pdf/2106.12345                              # PDFs come back as text
-webkit read -o page.md https://example.com/doc                            # large pages: save, then grep/read the file
-webkit search -p academic "temporal knowledge graph forecasting LLM"      # semantic_scholar > google_scholar > openalex > arxiv
-webkit search "temporal graph link prediction negative sampling"          # general: google > duckduckgo > bing
-webkit search --time month "claude code release notes"                    # recency filter (engines without it are skipped)
-webkit search --read 3 -o /tmp/q "query"                                  # search, then save the top 3 pages
-webkit crawl https://docs.example.com -o /tmp/docs --max-pages 10
-webkit download https://example.com/paper.pdf                             # -> ~/.cache/web-kit/downloads/
-webkit status                                                             # which engines / egress work right now
+webkit search -p academic "temporal knowledge graph forecasting LLM"
+webkit read https://example.org/post                                 # short page: printed; long: file + preview
+webkit read -o paper.md "https://openreview.net/pdf?id=FXdMgfCDer"   # a PDF comes back as text
+grep -n -i "ablation" paper.md                                       # then read only those lines
+webkit read --pdf -o paper.md 10.1145/3774904.3792101                # DOI -> paper page -> its PDF, as text
+webkit read arXiv:2403.01092                                         # the abstract page
+webkit download arXiv:2403.01092                                     # the PDF file
+webkit download -o papers/ https://dl.acm.org/doi/pdf/10.1145/3774904.3792101
+webkit status                                                        # which engines / egress work now
 ```
 
-## Rules
+Setup: `uv tool install git+https://github.com/huangyrcn/web-kit`, then `webkit config set url URL`,
+`webkit config set api-key` (key on stdin), `webkit skill install [--agent codex]`.
+When anything fails, run `webkit doctor` first. Every option of every command:
+`reference.md` next to this file, or `webkit <command> --help`.
+"""
 
-- Read the first line of `search` output: `# engines google=ok:8 duckduckgo=skipped ...`.
-  `error:network` on every engine means the backend lost its route out; say so, do not guess results.
-- Exit codes: 0 ok, 1 usage, 2 no results (engines healthy), 3 failed, 4 auth, 5 backend unreachable,
-  6 human action needed (CAPTCHA/login), 7 busy. Errors are one JSON line on stderr.
-- Exit 7 (busy): retry later; do not start more parallel `webkit` calls.
-- Exit 6: tell the user to solve the page via noVNC (`webkit browser open URL` needs the admin key),
-  or use `webkit download --wait-human`.
-- Save long pages with `-o` instead of printing them into context. `search --read` caps inline text at
-  3000 chars per page unless `-o DIR` is given.
-- Results are fetched live (no cache) unless `--cache` is passed.
+_REFERENCE_HEADER = """# web-kit command reference (`webkit` CLI {version}, API {api})
 
-## Command reference
+Generated from `webkit <command> --help`. When to use which command: SKILL.md.
 
 """
 
 
 def render(parser: argparse.ArgumentParser) -> str:
-    parts = [_HEADER.format(version=__version__, api=API_VERSION)]
+    """SKILL.md: when and how to use web-kit."""
+    return _HEADER.format(version=__version__, api=API_VERSION)
+
+
+def render_reference(parser: argparse.ArgumentParser) -> str:
+    """reference.md: every command's --help."""
+    parts = [_REFERENCE_HEADER.format(version=__version__, api=API_VERSION)]
     sub_action = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))  # noqa: SLF001
     for name, sp in sub_action.choices.items():
-        if name in ("skill", "config"):
+        if name in ("skill", "config", "engines"):
             continue
-        parts.append(f"### webkit {name}\n\n```\n{sp.format_help().strip()}\n```\n")
-        for a in sp._actions:  # noqa: SLF001 - nested groups (browser open)
+        parts.append(f"## webkit {name}\n\n```\n{sp.format_help().strip()}\n```\n")
+        for a in sp._actions:  # noqa: SLF001 - nested command groups
             if isinstance(a, argparse._SubParsersAction):  # noqa: SLF001
                 for sub_name, ssp in a.choices.items():
-                    parts.append(f"### webkit {name} {sub_name}\n\n```\n{ssp.format_help().strip()}\n```\n")
+                    parts.append(f"## webkit {name} {sub_name}\n\n```\n{ssp.format_help().strip()}\n```\n")
     return "\n".join(parts)

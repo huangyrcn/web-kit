@@ -8,18 +8,20 @@ PDFs are detected first and returned as extracted text, so research agents can
 from __future__ import annotations
 
 import asyncio
+import html as html_lib
 import io
 import logging
+import re
 import time
 from typing import Literal
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 from . import browser, settings
-from .download import HUMAN_MARKERS, fetch_bytes
-from .errors import WebkitError, classify
+from .download import fetch_bytes, wall_kind
+from .errors import WebkitError, blocked, classify, human_required
 
 logger = logging.getLogger("webkit.page")
 router = APIRouter()
@@ -33,6 +35,7 @@ class PageRequest(BaseModel):
     wait_for: str | None = Field(None, description="CSS selector, or milliseconds to wait")
     scroll: bool = False
     cache: bool = False
+    pdf: bool = Field(False, description="read the paper PDF this page links (citation_pdf_url)")
     max_chars: int = Field(0, ge=0)
     timeout: int = Field(settings.PAGE_TIMEOUT, ge=5, le=300)
 
@@ -88,14 +91,41 @@ def pdf_to_text(data: bytes) -> tuple[str, str, int]:
     return title, (f"# {title}\n\n{body}" if title else body), len(reader.pages)
 
 
-async def _read_pdf(req: PageRequest) -> dict | None:
-    data, fetched = await fetch_bytes(req.url, settings.PDF_MAX_BYTES)
+_PDF_META = re.compile(r"<meta\b[^>]*\bname\s*=\s*[\"']citation_pdf_url[\"'][^>]*>", re.I)
+_PDF_ALT = re.compile(r"<link\b[^>]*\btype\s*=\s*[\"']application/pdf[\"'][^>]*>", re.I)
+_CONTENT = re.compile(r"\b(?:content|href)\s*=\s*[\"']([^\"']+)[\"']", re.I)
+
+
+def pdf_link(html: str, base: str) -> str | None:
+    """The paper PDF a landing page declares: Highwire/Google Scholar `citation_pdf_url`
+    (publishers, arXiv, OpenReview, PMC), else <link type="application/pdf">."""
+    for rx in (_PDF_META, _PDF_ALT):
+        for tag in rx.finditer(html):
+            m = _CONTENT.search(tag.group(0))
+            if m and m.group(1).strip():
+                return urljoin(base, html_lib.unescape(m.group(1).strip()))
+    return None
+
+
+async def find_pdf_url(url: str, timeout: int = settings.PAGE_TIMEOUT) -> str | None:
+    """Render `url` and return the PDF it links (itself, if it is a PDF)."""
+    try:
+        rendered = await render(url, None, False, timeout)
+    except _IsPdf:
+        return url
+    return pdf_link(rendered["html"], rendered["final_url"])
+
+
+async def _read_pdf(req: PageRequest, url: str | None = None) -> dict | None:
+    data, fetched = await fetch_bytes(url or req.url, settings.PDF_MAX_BYTES)
     if data[:5] != b"%PDF-":
         return None  # not actually a PDF: fall back to the HTML path
     title, text, pages = await asyncio.to_thread(pdf_to_text, data)
     if req.format == "html":
         raise WebkitError("invalid_request", "format=html is not available for PDFs; use fit/md/json")
     out = {"url": req.url, "final_url": fetched.url, "title": title, "kind": "pdf", "pages": pages}
+    if url and url != req.url:
+        out["pdf_url"] = url
     if req.format == "links":
         out.update(format="links", links=[])
         return out
@@ -123,7 +153,10 @@ _FIT_EXCLUDED_SELECTOR = (
     ".sr-only,.is-sr-only,.visually-hidden,.screen-reader-text,.skip-link,"
     ".navbox,.mw-jump-link,.vector-header-container,#mw-navigation,#toc,.toc,"
     "[id*=cookie],[class*=cookie],[id*=consent],[class*=consent],[aria-label*=cookie],#onetrust-consent-sdk,"
-    ".cc-banner,.cc-window"
+    ".cc-banner,.cc-window,"
+    # skip links ("Skip to main content"), wiki banners, and hidden a11y strings
+    # (e.g. Atypon's "opens in a new window" labels)
+    "a[class*=skip],[class*=skipnav],[class*=skip-link],#siteNotice,#centralNotice,[hidden]"
 )
 
 
@@ -170,6 +203,7 @@ def _markdown(result, fit: bool) -> str:
 # HTML -> Markdown (scraping + pruning), never to drive the browser here.
 
 CHALLENGE_WAIT = 30  # seconds a real browser gets to clear an interstitial on its own
+ERROR_PAGE_WAIT = 8  # a short 4xx/5xx page may turn into a challenge once its script runs
 _SCROLL_JS = """async () => {
   for (let i = 0; i < 20; i++) {
     const before = document.scrollingElement.scrollHeight;
@@ -183,25 +217,43 @@ _cache: dict[tuple, tuple[float, dict]] = {}
 CACHE_TTL = 600
 
 
-def looks_like_challenge(title: str, text: str) -> bool:
-    """A short page whose title/text is an anti-bot interstitial."""
+def page_wall_kind(title: str, text: str, html: str = "") -> str | None:
+    """'blocked' / 'human' for an interstitial page, None for content. DataDome walls
+    keep their text in an iframe, so near-empty pages are checked by markup too."""
+    if "captcha-delivery.com" in html[:20000].lower():
+        return wall_kind("", html)
     if len(text) > 4000:
-        return False
-    head = (title + " " + text[:2000]).lower()
-    return any(m in head for m in HUMAN_MARKERS)
+        return None
+    return wall_kind(title + " " + text[:2000])
+
+
+def looks_like_challenge(title: str, text: str) -> bool:
+    """A short page whose title/text is an anti-bot interstitial a person can pass."""
+    return page_wall_kind(title, text) == "human"
 
 
 async def _page_state(page) -> str:
-    """'challenge', 'settling' (near-empty: JS checks such as NCBI's redirect within
-    seconds) or 'ready'."""
+    """'blocked', 'challenge', 'settling' (near-empty: JS checks such as NCBI's redirect
+    within seconds) or 'ready'."""
     try:
         title = await page.title()
         text = await page.evaluate("() => document.body ? document.body.innerText.slice(0, 4500) : ''")
+        html = await page.content() if len(text.strip()) < 200 else ""
     except Exception:  # noqa: BLE001 - mid-navigation
         return "settling"
-    if looks_like_challenge(title, text):
+    kind = page_wall_kind(title, text, html)
+    if kind == "blocked":
+        return "blocked"
+    if kind == "human":
         return "challenge"
     return "settling" if len(text.strip()) < 200 else "ready"
+
+
+async def _is_short(page) -> bool:
+    try:
+        return await page.evaluate("() => document.body ? document.body.innerText.length < 1500 : true")
+    except Exception:  # noqa: BLE001 - mid-navigation
+        return True
 
 
 class _IsPdf(Exception):
@@ -231,7 +283,10 @@ async def render(url: str, wait_for: str | None, scroll: bool, timeout: int) -> 
             while True:
                 state = await _page_state(page)
                 waited = time.monotonic() - t0
-                if state == "ready" or (state == "settling" and waited > 10) or waited > CHALLENGE_WAIT:
+                status = statuses[-1] if statuses else (resp.status if resp is not None else 0)
+                if state == "ready" and status >= 400 and waited < ERROR_PAGE_WAIT and await _is_short(page):
+                    state = "settling"  # e.g. ResearchGate: "Temporarily Unavailable" -> "Just a moment..."
+                if state in ("ready", "blocked") or (state == "settling" and waited > 10) or waited > CHALLENGE_WAIT:
                     break
                 await page.wait_for_timeout(1000)
                 # Some checks ("Cookies must be enabled ... reload this page") set a cookie
@@ -240,12 +295,11 @@ async def render(url: str, wait_for: str | None, scroll: bool, timeout: int) -> 
                         "() => document.body ? document.body.innerText.slice(0, 400).toLowerCase() : ''")):
                     reloaded = True
                     await page.reload(wait_until="domcontentloaded", timeout=timeout * 1000)
-            if await _page_state(page) == "challenge":
-                raise WebkitError(
-                    "human_required", "the site shows an anti-bot / verification page that the browser did not pass",
-                    hint=f"solve it once with `webkit browser open '{url}'` (noVNC); the browser keeps the pass",
-                    url=url,
-                )
+            final = await _page_state(page)
+            if final == "blocked":
+                raise blocked(url, "the site refuses this server (block page instead of content)")
+            if final == "challenge":
+                raise human_required(url, "the site shows an anti-bot / verification page that the browser did not pass")
             try:
                 await page.wait_for_load_state("load", timeout=10000)
             except Exception:  # noqa: BLE001 - slow trackers must not fail a read
@@ -298,12 +352,22 @@ def _finish(out: dict, max_chars: int) -> dict:
 @router.post("/v2/page")
 async def page(req: PageRequest):
     _check_url(req.url)
-    key = (req.url, req.format, req.wait_for, req.scroll)
+    key = (req.url, req.format, req.wait_for, req.scroll, req.pdf)
     if req.cache and key in _cache and _cache[key][0] > time.time():
         return _finish(dict(_cache[key][1]), req.max_chars)
 
     out = None
-    if req.format != "html" and await _is_pdf(req.url):
+    if req.pdf and req.format != "html" and not await _is_pdf(req.url):
+        pdf_url = await find_pdf_url(req.url, req.timeout)
+        if not pdf_url:
+            raise WebkitError("not_found", "this page links no PDF (no citation_pdf_url)", url=req.url,
+                              hint="read the page itself (without --pdf), or find the PDF link with `-f links`")
+        out = await _read_pdf(req, pdf_url)
+        if out is None:
+            raise WebkitError("not_a_file", f"the page's PDF link did not return a PDF: {pdf_url}", url=req.url,
+                              pdf_url=pdf_url, hint="the publisher may need a login or show a viewer; "
+                              "try `webkit download URL`, or read the page itself")
+    elif req.format != "html" and await _is_pdf(req.url):
         out = await _read_pdf(req)
     if out is None:
         try:
