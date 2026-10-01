@@ -29,6 +29,9 @@ services:
       WEBKIT_VNC_PASSWORD: ${WEBKIT_VNC_PASSWORD:-}
       SEARXNG_SECRET: ${SEARXNG_SECRET:?set SEARXNG_SECRET in .env}
       WEBKIT_MAX_PAGES: ${WEBKIT_MAX_PAGES:-5}
+      # Browser time zone. Match the egress IP's region: a UTC browser on a
+      # California IP is an anti-bot signal.
+      TZ: ${WEBKIT_TZ:-UTC}
     volumes:
       - ./searxng-settings:/etc/searxng:rw
       - chrome-profile:/data/chrome-profile

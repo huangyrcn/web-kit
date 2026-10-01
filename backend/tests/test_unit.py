@@ -194,30 +194,36 @@ def test_crawl_caps():
     assert resp.status_code == 400 and "capped" in resp.json()["message"]
 
 
-class _FakeResult:
-    def __init__(self, title="", markdown="", error=None, success=True, status=200):
-        self.metadata = {"title": title}
-        self.markdown = markdown
-        self.error_message = error
-        self.success = success
-        self.status_code = status
-
-
-@pytest.mark.parametrize("title,md,error,expected", [
-    ("Just a moment...", "# Are you a robot? Please confirm you are a human", None, True),
-    ("Verifying your browser | OpenReview", "Complete the check below to continue", None, True),
-    ("", "", "Blocked by anti-bot protection: Cloudflare JS challenge", True),
-    ("Self-supervised learning of molecules", "A long article about CAPTCHA design. " * 200, None, False),
-    ("Example Domain", "This domain is for use in documentation examples.", None, False),
+@pytest.mark.parametrize("title,text,expected", [
+    ("Just a moment...", "# Are you a robot? Please confirm you are a human", True),
+    ("Verifying your browser | OpenReview", "Complete the check below to continue", True),
+    ("请稍候…", "正在验证您是否是真人。这可能需要几秒钟时间。", True),
+    ("Self-supervised learning of molecules", "A long article about CAPTCHA design. " * 200, False),
+    ("Example Domain", "This domain is for use in documentation examples.", False),
 ])
-def test_challenge_detection(title, md, error, expected):
-    from webkit_api.page import _is_challenge
-    assert _is_challenge(_FakeResult(title, md, error)) is expected
+def test_challenge_detection(title, text, expected):
+    from webkit_api.page import looks_like_challenge
+    assert looks_like_challenge(title, text) is expected
 
 
-def test_challenge_detection_zh():
-    from webkit_api.page import _is_challenge
-    assert _is_challenge(_FakeResult("请稍候…", "正在验证您是否是真人。这可能需要几秒钟时间。"))
+def test_to_markdown_fit_drops_site_chrome():
+    from webkit_api.page import to_markdown
+    html = """<html><head><title>Knowledge graph</title></head><body>
+      <header><nav>Main menu Home About</nav></header>
+      <a class="skip-link" href="#c">Skip to main content</a>
+      <main id="c"><h1>Knowledge graph</h1>
+        <p>A knowledge graph is a knowledge base that uses a graph-structured data model to represent
+        and operate on data. It stores interlinked descriptions of entities, objects, events and concepts.</p>
+        <p>Knowledge graphs are used in search engines, question answering and recommender systems,
+        where they connect facts across many sources and support reasoning over relations.</p>
+        <p>See <a href="https://arxiv.org/abs/2002.00388">the survey</a> for details.</p></main>
+      <footer>Privacy policy | Terms</footer></body></html>"""
+    fit, cleaned, links, meta = to_markdown("https://example.org/wiki/kg", html, fit=True)
+    assert "graph-structured data model" in fit
+    assert "Main menu" not in fit and "Privacy policy" not in fit and "Skip to main content" not in fit
+    full, *_ = to_markdown("https://example.org/wiki/kg", html, fit=False)
+    assert "Privacy policy" in full
+    assert any(l.href == "https://arxiv.org/abs/2002.00388" for l in links.external)
 
 
 def test_wall_response_detection():

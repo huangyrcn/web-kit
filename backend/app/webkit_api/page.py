@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import time
 from typing import Literal
 from urllib.parse import urlparse
 
@@ -120,7 +121,9 @@ _FIT_EXCLUDED_TAGS = ["nav", "header", "footer", "aside", "form", "noscript"]
 _FIT_EXCLUDED_SELECTOR = (
     "[role=navigation],[role=banner],[role=contentinfo],[role=search],[aria-label=breadcrumb],"
     ".sr-only,.is-sr-only,.visually-hidden,.screen-reader-text,.skip-link,"
-    ".navbox,.mw-jump-link,.vector-header-container,#mw-navigation,#toc,.toc"
+    ".navbox,.mw-jump-link,.vector-header-container,#mw-navigation,#toc,.toc,"
+    "[id*=cookie],[class*=cookie],[id*=consent],[class*=consent],[aria-label*=cookie],#onetrust-consent-sdk,"
+    ".cc-banner,.cc-window"
 )
 
 
@@ -159,35 +162,124 @@ def _markdown(result, fit: bool) -> str:
     return getattr(md, "raw_markdown", "") or str(md)
 
 
-_CHALLENGE_DONE_JS = (
-    "js:() => !/just a moment|verifying your browser|checking your browser|are you a robot|attention required|请稍候|正在验证/i"
-    ".test(document.title + ' ' + (document.body ? document.body.innerText.slice(0, 400) : ''))"
-)
+# ─── HTML: rendered by the shared (patchright) Chrome, converted offline ──────────
+#
+# Rendering goes through the same patchright browser as the search engines, so a
+# page read does not leak vanilla-Playwright automation signals that would undo a
+# profile's standing with Cloudflare-style checks. crawl4ai is used only for
+# HTML -> Markdown (scraping + pruning), never to drive the browser here.
+
+CHALLENGE_WAIT = 30  # seconds a real browser gets to clear an interstitial on its own
+_SCROLL_JS = """async () => {
+  for (let i = 0; i < 20; i++) {
+    const before = document.scrollingElement.scrollHeight;
+    window.scrollTo(0, before);
+    await new Promise(r => setTimeout(r, 400));
+    if (document.scrollingElement.scrollHeight === before) break;
+  }
+  window.scrollTo(0, 0);
+}"""
+_cache: dict[tuple, tuple[float, dict]] = {}
+CACHE_TTL = 600
 
 
-def _is_challenge(result) -> bool:
-    """A short page whose title/text is an anti-bot interstitial, or crawl4ai's own block verdict."""
-    if (result.error_message or "").startswith("Blocked by anti-bot protection"):
-        return True
-    title = ((result.metadata or {}).get("title") or "").lower()
-    text = _markdown(result, False)
+def looks_like_challenge(title: str, text: str) -> bool:
+    """A short page whose title/text is an anti-bot interstitial."""
     if len(text) > 4000:
         return False
     head = (title + " " + text[:2000]).lower()
     return any(m in head for m in HUMAN_MARKERS)
 
 
-def _check_result(result, url: str) -> None:
-    if _is_challenge(result):
-        raise WebkitError(
-            "human_required", "the site shows an anti-bot / verification page that the browser did not pass",
-            hint=f"solve it once with `webkit browser open '{url}'` (noVNC), then retry", url=url,
-        )
-    if not result.success:
-        raise classify(RuntimeError(result.error_message or "crawl failed"))
-    if result.status_code and result.status_code >= 400:
-        raise WebkitError("upstream_http", f"site returned HTTP {result.status_code}",
-                          status_code=result.status_code)
+async def _page_state(page) -> str:
+    """'challenge', 'settling' (near-empty: JS checks such as NCBI's redirect within
+    seconds) or 'ready'."""
+    try:
+        title = await page.title()
+        text = await page.evaluate("() => document.body ? document.body.innerText.slice(0, 4500) : ''")
+    except Exception:  # noqa: BLE001 - mid-navigation
+        return "settling"
+    if looks_like_challenge(title, text):
+        return "challenge"
+    return "settling" if len(text.strip()) < 200 else "ready"
+
+
+class _IsPdf(Exception):
+    pass
+
+
+async def render(url: str, wait_for: str | None, scroll: bool, timeout: int) -> dict:
+    """Open `url` in the shared Chrome and return the settled DOM."""
+    async with browser.page_slot():
+        page = await (await browser.context()).new_page()
+        statuses: list[int] = []
+
+        def on_response(resp):
+            try:
+                if resp.request.resource_type == "document" and resp.frame == page.main_frame:
+                    statuses.append(resp.status)
+            except Exception:  # noqa: BLE001
+                pass
+
+        page.on("response", on_response)
+        try:
+            resp = await page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
+            if resp is not None and "application/pdf" in (resp.headers.get("content-type") or ""):
+                raise _IsPdf()
+            t0 = time.monotonic()
+            reloaded = False
+            while True:
+                state = await _page_state(page)
+                waited = time.monotonic() - t0
+                if state == "ready" or (state == "settling" and waited > 10) or waited > CHALLENGE_WAIT:
+                    break
+                await page.wait_for_timeout(1000)
+                # Some checks ("Cookies must be enabled ... reload this page") set a cookie
+                # and only let a reload through; give the site's own redirect time first.
+                if state == "challenge" and not reloaded and waited > 6 and "reload" in (await page.evaluate(
+                        "() => document.body ? document.body.innerText.slice(0, 400).toLowerCase() : ''")):
+                    reloaded = True
+                    await page.reload(wait_until="domcontentloaded", timeout=timeout * 1000)
+            if await _page_state(page) == "challenge":
+                raise WebkitError(
+                    "human_required", "the site shows an anti-bot / verification page that the browser did not pass",
+                    hint=f"solve it once with `webkit browser open '{url}'` (noVNC); the browser keeps the pass",
+                    url=url,
+                )
+            try:
+                await page.wait_for_load_state("load", timeout=10000)
+            except Exception:  # noqa: BLE001 - slow trackers must not fail a read
+                pass
+            if wait_for:
+                if wait_for.isdigit():
+                    await page.wait_for_timeout(int(wait_for))
+                else:
+                    await page.wait_for_selector(wait_for.removeprefix("css:"), timeout=timeout * 1000)
+            if scroll:
+                await page.evaluate(_SCROLL_JS)
+            status = statuses[-1] if statuses else (resp.status if resp is not None else 0)
+            return {"html": await page.content(), "title": await page.title(), "final_url": page.url,
+                    "status": status}
+        except (WebkitError, _IsPdf):
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise classify(e) from None
+        finally:
+            await browser.safe_close(page)
+
+
+def to_markdown(url: str, html: str, fit: bool):
+    """(markdown, cleaned_html, links, metadata) using crawl4ai's scraper and generator."""
+    from crawl4ai.content_filter_strategy import PruningContentFilter
+    from crawl4ai.content_scraping_strategy import LXMLWebScrapingStrategy
+    from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
+
+    kwargs = {"excluded_tags": _FIT_EXCLUDED_TAGS, "excluded_selector": _FIT_EXCLUDED_SELECTOR} if fit else {}
+    scraped = LXMLWebScrapingStrategy().scrap(url, html, **kwargs)
+    md = DefaultMarkdownGenerator(content_filter=PruningContentFilter() if fit else None).generate_markdown(
+        input_html=scraped.cleaned_html, base_url=url, citations=False)
+    text = (md.fit_markdown if fit and md.fit_markdown else md.raw_markdown) or ""
+    return text, scraped.cleaned_html, scraped.links, scraped.metadata or {}
 
 
 def _truncate(text: str, max_chars: int) -> tuple[str, bool]:
@@ -196,58 +288,54 @@ def _truncate(text: str, max_chars: int) -> tuple[str, bool]:
     return text, False
 
 
+def _finish(out: dict, max_chars: int) -> dict:
+    if "content" in out:
+        out["content"], out["truncated"] = _truncate(out["content"], max_chars)
+        out["chars"] = len(out["content"])
+    return out
+
+
 @router.post("/v2/page")
 async def page(req: PageRequest):
     _check_url(req.url)
+    key = (req.url, req.format, req.wait_for, req.scroll)
+    if req.cache and key in _cache and _cache[key][0] > time.time():
+        return _finish(dict(_cache[key][1]), req.max_chars)
+
+    out = None
     if req.format != "html" and await _is_pdf(req.url):
         out = await _read_pdf(req)
-        if out is not None:
-            if "content" in out:
-                out["content"], out["truncated"] = _truncate(out["content"], req.max_chars)
-                out["chars"] = len(out["content"])
-            return out
-
-    from crawl4ai import AsyncWebCrawler
-
-    config = _run_config(req.format == "fit", req.cache, req.wait_for, req.scroll, req.timeout)
-    async with browser.page_slot():
+    if out is None:
         try:
-            async with AsyncWebCrawler(config=_browser_config()) as crawler:
-                result = await asyncio.wait_for(crawler.arun(url=req.url, config=config),
-                                                timeout=req.timeout + 15)
-                # A real browser usually clears Cloudflare-style interstitials on its own
-                # within seconds; the first capture can be too early. Retry once, waiting
-                # until the title/text no longer looks like a challenge.
-                if _is_challenge(result) or (not result.success and "_crawl_web" in (result.error_message or "")):
-                    logger.info("challenge or crawl error on %s; retrying with wait", req.url)
-                    retry = _run_config(req.format == "fit", False, _CHALLENGE_DONE_JS, req.scroll,
-                                        max(req.timeout, 30))
-                    result = await asyncio.wait_for(crawler.arun(url=req.url, config=retry),
-                                                    timeout=max(req.timeout, 30) + 15)
-        except WebkitError:
-            raise
-        except Exception as e:  # noqa: BLE001
-            raise classify(e) from None
-    _check_result(result, req.url)
-
-    title = (result.metadata or {}).get("title") or ""
-    out = {"url": req.url, "final_url": getattr(result, "redirected_url", None) or result.url,
-           "title": title, "kind": "html", "format": req.format}
-    if req.format == "links":
-        links = []
-        for scope in ("internal", "external"):
-            for link in (result.links or {}).get(scope, []):
-                if link.get("href"):
-                    links.append({"href": link["href"], "text": (link.get("text") or "").strip(), "scope": scope})
-        out["links"] = links
-        return out
-    if req.format == "html":
-        content = result.cleaned_html or ""
-    else:
-        content = _markdown(result, req.format == "fit")
-    out["content"], out["truncated"] = _truncate(content, req.max_chars)
-    out["chars"] = len(out["content"])
-    return out
+            rendered = await render(req.url, req.wait_for, req.scroll, req.timeout)
+        except _IsPdf:
+            out = await _read_pdf(req)
+            if out is None:
+                raise WebkitError("internal", "server announced a PDF but did not deliver one") from None
+        else:
+            if rendered["status"] >= 400:
+                raise WebkitError("upstream_http", f"site returned HTTP {rendered['status']}",
+                                  status_code=rendered["status"])
+            text, cleaned, links, meta = await asyncio.to_thread(
+                to_markdown, rendered["final_url"], rendered["html"], req.format == "fit")
+            out = {"url": req.url, "final_url": rendered["final_url"],
+                   "title": rendered["title"] or meta.get("title") or "", "kind": "html", "format": req.format}
+            if req.format == "links":
+                out["links"] = [{"href": l.href, "text": (l.text or "").strip(), "scope": scope}
+                                for scope in ("internal", "external")
+                                for l in getattr(links, scope, []) if l.href]
+            elif req.format == "html":
+                out["content"] = cleaned
+            elif req.format == "json":
+                out["content"] = text
+                out["metadata"] = {k: v for k, v in meta.items() if isinstance(v, (str, int, float))}
+            else:
+                out["content"] = text
+    if len(_cache) > 256:  # keep the in-process cache small
+        for k in [k for k, (exp, _) in _cache.items() if exp < time.time()] or list(_cache)[:128]:
+            _cache.pop(k, None)
+    _cache[key] = (time.time() + CACHE_TTL, dict(out))
+    return _finish(out, req.max_chars)
 
 
 @router.post("/v2/crawl")

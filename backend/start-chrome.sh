@@ -32,6 +32,9 @@ export DISPLAY=:99
 #
 # We let GPU run via Xvfb's software stack (Mesa) — its WebGL fingerprint blends
 # in with real users far better than SwiftShader (which --disable-gpu forces).
+# Chrome blocklists software GL by default, which leaves the page with NO WebGL
+# at all — a strong bot signal for Cloudflare / Turnstile. --ignore-gpu-blocklist
+# turns WebGL back on over Mesa.
 exec google-chrome-stable \
     --no-sandbox \
     --no-first-run \
@@ -41,6 +44,7 @@ exec google-chrome-stable \
     --user-data-dir=/data/chrome-profile \
     --disable-dev-shm-usage \
     --disable-blink-features=AutomationControlled \
+    --ignore-gpu-blocklist \
     --window-size=1920,1080 \
     --force-webrtc-ip-handling-policy=disable_non_proxied_udp \
     "about:blank"

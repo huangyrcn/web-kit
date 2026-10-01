@@ -35,7 +35,8 @@ HUMAN_MARKERS = ("recaptcha", "g-recaptcha", "verify you are human", "unusual tr
                  "checking if the site connection is secure", "cf-challenge", "captcha",
                  "just a moment", "are you a robot", "verifying your browser", "checking your browser",
                  "complete the check below", "attention required", "enable javascript and cookies",
-                 "请稍候", "正在验证", "是否是真人")  # Cloudflare in a zh-CN browser
+                 "请稍候", "正在验证", "是否是真人",
+                 "cookies must be enabled")  # Cloudflare in a zh-CN browser
 
 
 @dataclass
