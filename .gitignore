@@ -30,3 +30,6 @@ ask-search-workspace/
 
 # Docker compose override
 backend/docker-compose.override.yml
+
+# Test caches
+.pytest_cache/

@@ -1,35 +1,37 @@
+# web-kit v2 backend.
+#
+#   cp .env.example .env   # fill in the secrets
+#   cp searxng-settings/settings.yml.example searxng-settings/settings.yml
+#   docker compose up -d --build
+#
+# Several instances can share one host (e.g. a test stack next to production):
+# give each its own project name (-p), WEBKIT_CONTAINER and ports in its .env.
 services:
-  web-kit-backend:
-    image: web-kit-backend:latest
+  web-kit:
+    image: ${WEBKIT_IMAGE:-web-kit:v2}
     build:
       context: .
-      dockerfile: Dockerfile
-    container_name: web-kit-backend
+      args:
+        IMAGE_TAG: ${WEBKIT_IMAGE:-web-kit:v2}
+    container_name: ${WEBKIT_CONTAINER:-web-kit}
     restart: unless-stopped
     shm_size: "1gb"
-    mem_limit: 4g
-    # Default: bind to 127.0.0.1 only. The CDP endpoint and noVNC give full
-    # browser-session takeover to anyone who can reach them, so we don't
-    # publish them on 0.0.0.0 by default. To expose to the LAN, set
-    # WEB_KIT_BIND=0.0.0.0 in .env (and set WEB_KIT_VNC_PASSWORD as well —
-    # supervisord uses x11vnc -nopw when it's empty).
+    mem_limit: ${WEBKIT_MEM_LIMIT:-4g}
     ports:
-      - "${WEB_KIT_BIND:-127.0.0.1}:8082:8082"   # SearxNG via Caddy  (web-kit searxng-search)
-      - "${WEB_KIT_BIND:-127.0.0.1}:9223:9223"   # Chrome CDP (web-kit browser-fetch)
-      - "${WEB_KIT_BIND:-127.0.0.1}:6080:6080"   # noVNC (manual cookie login)
+      # The API port is the only one clients need. noVNC and CDP are admin-only.
+      - "${WEBKIT_BIND:-127.0.0.1}:${WEBKIT_API_PORT:-8082}:8082"
+      - "${WEBKIT_BIND:-127.0.0.1}:${WEBKIT_VNC_PORT:-6080}:6080"
+      - "${WEBKIT_BIND:-127.0.0.1}:${WEBKIT_CDP_PORT:-9223}:9223"
     environment:
-      WEB_KIT_VNC_PASSWORD: ${WEB_KIT_VNC_PASSWORD:-}
-      WEB_KIT_API_KEY: ${WEB_KIT_API_KEY:?WEB_KIT_API_KEY must be set in .env}
-      WEB_KIT_NOVNC_HASH: ${WEB_KIT_NOVNC_HASH:?WEB_KIT_NOVNC_HASH must be set in .env}
+      WEBKIT_API_KEY: ${WEBKIT_API_KEY:?set WEBKIT_API_KEY in .env}
+      WEBKIT_ADMIN_KEY: ${WEBKIT_ADMIN_KEY:?set WEBKIT_ADMIN_KEY in .env}
+      WEBKIT_NOVNC_HASH: ${WEBKIT_NOVNC_HASH:?set WEBKIT_NOVNC_HASH in .env}
+      WEBKIT_VNC_PASSWORD: ${WEBKIT_VNC_PASSWORD:-}
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?set SEARXNG_SECRET in .env}
+      WEBKIT_MAX_PAGES: ${WEBKIT_MAX_PAGES:-5}
     volumes:
       - ./searxng-settings:/etc/searxng:rw
       - chrome-profile:/data/chrome-profile
-    healthcheck:
-      test: ["CMD", "/usr/local/bin/healthcheck.sh"]
-      interval: 30s
-      timeout: 10s
-      start_period: 90s
-      retries: 3
 
 volumes:
   chrome-profile:

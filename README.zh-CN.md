@@ -2,236 +2,71 @@
 
 [English](./README.md)
 
-一个面向 AI 编程代理（Claude Code、Copilot CLI 等）的技能包，提供
-**两个轻量级 Web 基元能力**：搜索、浏览器抓取。
-并附带一个可自托管的**单容器后端**来统一支撑这些能力。
+给 AI Agent 用的自托管 Web 访问服务：**搜索、读网页、爬取、下载**，全部由服务器上一个真实的、已登录的 Chrome 完成。Agent 只调用一个很小的 CLI（`webkit`），浏览器的活都在服务端。
 
 ```
-┌──────────────────────────┐         ┌──────────────────────────────────┐
-│   skill/  (AI 技能层)    │  ◄───►  │   backend/  (服务端)             │
-│   ─────────────────────  │         │   ─────────────────────────────  │
-│   searxng-search             │         │   SearxNG + Chrome+Playwright    │
-│   browser-fetch          │         │   CDP，全都在一个容器里，         │
-│     ├─ page (→ markdown) │         │   4 层自愈                        │
-│     └─ file (→ 原始文件) │         │                                  │
-└──────────────────────────┘         └──────────────────────────────────┘
-        │                                            ▲
-        └─ uses ──── SEARXNG_URL=http://...:8082 ────┤
-                     CDP_URL=http://...:9223 ────────┘
+ Agent ──► webkit CLI ──HTTP + key──►  后端容器（只开一个 API 端口）
+                                        ├─ Caddy（鉴权）
+                                        ├─ webkit-api ── Chrome（持久化配置，patchright）
+                                        │                 └─ 读网页用 crawl4ai，下载走 CDP
+                                        ├─ SearXNG（API 型引擎：github、pypi、openalex 等）
+                                        └─ noVNC（管理员：手动登录或过一次验证码）
 ```
 
-你可以整体一起使用（本仓库主场景），也可以拆分使用：
-- **仅 skill**：指向你现有的 SearxNG / 开启 CDP 的 Chrome。
-- **仅 backend**：可直接替代常见的 4 容器 searxng + browser-proxy 方案。
+和普通元搜索或爬虫服务的区别：web-kit 在服务端保留**你自己的**浏览器身份（cookie、登录状态），用这个浏览器去抓 Google、DuckDuckGo、Google Scholar、Semantic Scholar、arXiv 这几个关键引擎，并逐个汇报每个引擎的结果，空结果不会含糊不清。
 
----
+## 定位
 
-## skill/ — AI 技能层
+**WebSearch 负责找，web-kit 负责读。** Agent 做一般检索仍用内置搜索；需要精确内容时用 web-kit：
 
-代理可调用的两个技能。`browser-fetch` 提供两个子命令（`page`、`file`）：
+| 需求 | 用什么 |
+|---|---|
+| 逐字读网页或 PDF（引文、数字、表格、论文全文），需要执行 JS 或登录才能看的页面 | `webkit read`（不用 WebFetch，它给的是模型摘要） |
+| 登录后才能下载的文件 | `webkit download` |
+| 找论文（CS / ML） | `webkit search -p academic`（Semantic Scholar、Google Scholar、OpenAlex、arXiv） |
+| 一般网页搜索 | Agent 内置搜索；它不可用或额度用尽后改用 `webkit search` |
+| 点击、输入、填表 | 不用 web-kit（那是浏览器自动化的活） |
 
-| 工具 | 功能 | 代理何时会用 |
-|---|---|---|
-| `searxng-search "<query>"` | 基于 SearxNG 的搜索，默认 Google，可显式切换单个引擎 | “搜索 X”、“查一下”、“找一下…” |
-| `browser-fetch page "<url>"` | 用真实浏览器渲染页面并转为干净 markdown | “读这个页面”、“这个 URL 说了什么”、“转成 markdown” |
-| `browser-fetch file <url>` | 通过 Chrome DevTools Protocol 下载文件（复用浏览器 Cookie） | “下载这个 PDF”、当 `wget`/`curl` 无法下载鉴权资源时 |
+部署上的限制：所有客户端共用一个 Chrome（`WEBKIT_MAX_PAGES`，默认 5 个页面，超出后返回退出码 7「忙」）；所有流量都从后端主机的出口出去，很多 Agent 同时大量搜索会让大家都更容易遇到验证码。所以大批量检索仍留给内置搜索。
 
-相比代理内置的普通 Web 工具，这个 skill 提供：
-- 真实 JS 渲染（看到的是用户实际看到的页面，而不是服务端裁剪版本）
-- 持久登录 Cookie（通过 noVNC 登录一次，后续抓取可持续带鉴权）
-- Google 优先搜索，并支持显式单引擎 fallback（DDG、Bing、学术来源、代码/包引擎等）
-- 轻量 CLI 接口（不需要 MCP server / 额外 runtime）
-
-### 安装（以 Claude Code 为例）
-
-只需一个运行时依赖：[`uv`](https://docs.astral.sh/uv/) —— 执行所有 Python
-脚本并自动安装内联依赖（crawl4ai、websocket-client 等），首次运行时自动完成。
+## 客户端
 
 ```bash
-# 1. 克隆仓库并复制 skill 到 skills 目录
-git clone https://github.com/huangyrcn/web-kit.git
-cp -r web-kit/skill ~/.claude/skills/web-kit
-chmod +x ~/.claude/skills/web-kit/scripts/*
-
-# 2. 安装 uv（如尚未安装）
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 3. 告诉 skill 后端地址
-export SEARXNG_URL=http://your-host:8082
-export CDP_URL=http://your-host:9223
+uv tool install git+https://github.com/huangyrcn/web-kit     # 升级：uv tool upgrade web-kit
+webkit config set url http://your-server:8082
+webkit config set api-key            # 从标准输入读取 key
+webkit doctor
+webkit skill install                 # 生成与当前 CLI 版本一致的 ~/.claude/skills/web-kit/SKILL.md
 ```
 
-Copilot CLI、Gemini CLI 或其他平台请参考 `skill/SKILL.md`，文档里列出了各平台的 skill 加载方式。
+```bash
+webkit search "query"                          # 通用：google > duckduckgo > bing
+webkit search -p academic --time year "query"  # semantic_scholar > google_scholar > openalex > arxiv
+webkit search --read 3 -o out/ "query"         # 搜索后保存前 3 条结果的正文
+webkit read https://arxiv.org/pdf/1706.03762   # PDF 直接返回文字
+webkit crawl https://docs.example.com -o docs/ --max-pages 10
+webkit download https://example.com/paper.pdf  # 默认存到 ~/.cache/web-kit/downloads/
+webkit status                                  # 浏览器、出网、各引擎健康状况
+```
 
-### 必需环境变量
+`search` 输出的第一行汇报各引擎结果，例如 `# engines google=error:network duckduckgo=ok:8 bing=skipped`。
+退出码：0 成功 · 1 用法错误 · 2 无结果 · 3 失败 · 4 认证 · 5 后端不可达 · 6 需要人工处理（验证码或登录）· 7 忙。错误以一行 JSON 输出到标准错误。
 
-| 变量 | 被谁使用 | 示例 |
-|---|---|---|
-| `SEARXNG_URL` | `searxng-search` | `http://localhost:8082` |
-| `CDP_URL` | `browser-fetch`（`page`、`file`） | `http://localhost:9223` |
-| `WEB_KIT_API_KEY` | 两个技能 + 网关 | `$(openssl rand -hex 32)` |
-
-如果你已经有可用的 SearxNG 实例和暴露 CDP 的 Chrome，到这里即可。
-
----
-
-## backend/ — 单容器服务端
-
-自托管后端同时提供 `SEARXNG_URL`（8082 端口）和 `CDP_URL`（9223 端口），
-并提供 noVNC 界面（6080 端口）用于首次手动登录以写入 Cookie。
-
-### 为什么打包成一个容器？
-
-传统自托管方案里，带 JS 渲染搜索代理的 SearxNG 往往需要 4 个以上容器
-（searxng、redis、browser-proxy、novnc）并靠网络编排连接。
-这种方式比较脆弱：一个容器故障可能连锁影响其余组件，且缺乏统一监控与重启入口。
-
-这个 backend 将其收敛为**单容器**，由 `supervisord` 统一管理所有进程，并实现**四层自愈**：
-
-1. **进程级**：supervisord `autorestart=true`，任一进程崩溃自动拉起。
-2. **应用级**：每次请求时 `_ensure_browser()` 都会在必要时重连 CDP（覆盖 Chrome 中途崩溃场景）。
-3. **容器级**：Docker `HEALTHCHECK` 探测全部三个对外端口。
-4. **业务级**：`watchdog.sh` 每 300 秒探测内部健康；连续 3 次失败后执行
-   `supervisorctl restart chrome search-proxy`（可覆盖”进程存活但浏览器假死”场景）。
-
-### 快速启动
+## 后端
 
 ```bash
 cd backend
+cp .env.example .env && chmod 600 .env      # key、端口、监听地址
 cp searxng-settings/settings.yml.example searxng-settings/settings.yml
-$EDITOR searxng-settings/settings.yml      # 设置 secret_key 及可选 API key
-
-docker compose up -d                        # 首次构建约 5-10 分钟（Chrome + SearxNG）
-sleep 90                                    # 预热
-
-curl -H "X-API-Key: $WEB_KIT_API_KEY" 'http://localhost:8082/search?q=test&format=json' | jq '.results | length'
-curl -H "X-API-Key: $WEB_KIT_API_KEY" http://localhost:9223/json/version | jq .Browser
+docker compose up -d --build
 ```
 
-首次 Google 登录（有助于降低后续验证码频率）：
-1. 打开 `http://localhost:6080/vnc.html` —— 网关需要 HTTP Basic 认证：用户名 `webkit`，密码 = 你的 `WEB_KIT_API_KEY`
-2. 点击 **Connect**，会看到 fluxbox 桌面和 Chrome 窗口
-3. 登录 Google；Cookie 会持久化在 Docker volume 中
+- `8082`：API（`X-API-Key`；`/v2/admin/*` 需要 `X-Admin-Key`）
+- `6080`：noVNC，仅管理员使用（用户名 `webkit`，密码为管理 key）。在这里登录一次网站，cookie 会保存在 `chrome-profile` 卷里
+- `9223`：原始 CDP，仅管理员使用
 
-### 架构
+`webkit status` 会显示出网探测结果（对每个上游域名只做一次 TLS 握手，不消耗搜索次数）、浏览器状态，以及各引擎最近的成败。自愈机制：supervisord 负责重启进程；CDP 连接失效时 watchdog 重启 Chrome 和 API；容器健康检查覆盖 Chrome、API 和 SearXNG。
 
-```
-        backend 容器（supervisord PID 1，监管 9 个程序）
-   ┌─────────────────────────────────────────────────────────────────────┐
-   │                                                                     │
-   │  Xvfb :99 ── fluxbox ── x11vnc :5900 ── websockify ─► host:6080     │
-   │                                                                     │
-   │  google-chrome --remote-debugging-port=9222                         │
-   │       │                                                             │
-   │       ├─ socat ─► host:9223  (CDP，供 Playwright/Puppeteer 使用)    │
-   │       │                                                             │
-   │       └─ search-proxy (FastAPI :3100，仅 localhost)                 │
-   │              ↑                                                      │
-   │              └─ /google、/ddg 端点 —— Chrome 渲染 HTML              │
-   │                                                                     │
-   │  SearxNG (granian :8080) ── http://localhost:3100/{google,ddg}      │
-   │       └─► host:8082                                                 │
-   │                                                                     │
-   │  watchdog.sh (300s 探测) ── 异常时 supervisorctl 重启               │
-   │                                                                     │
-   └─────────────────────────────────────────────────────────────────────┘
-```
+能力边界：Cloudflare Turnstile、DataDome / PerimeterX，以及必须使用住宅 IP 的站点，单个机房或家宽出口无法稳定访问。
 
-### 可靠性（单台 x86_64 主机实测）
-
-| 故障模式 | 恢复表现 | 机制 |
-|---|---|---|
-| Chrome 被杀死（`pkill -9`） | CDP 约 12s 恢复，搜索结果约 43s 恢复 | supervisord + `_ensure_browser()` 重连 |
-| FastAPI search-proxy 卡死 | < 60s | watchdog 检测并重启 |
-| 上游网络抖动 | 每次隔离 < 60s | failure cache + SearxNG `suspended_times` |
-| 容器 OOM | 取决于主机 | `restart: unless-stopped` |
-
-### 反检测能力
-
-浏览器侧使用 [`patchright`](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright)
-（可直接替换 Playwright，修补 CDP 层如 `Runtime.enable` / `Console.enable` 泄露）
-并配合最小化 Chrome flag 集合。
-在典型测试站点上的验证结果：
-
-| 测试站点 | 结果 |
-|---|---|
-| `bot.sannysoft.com` | WebDriver / WebDriver Advanced / Chrome / Plugins / `debugTool: false` 全部通过 |
-| `nowsecure.nl`（Cloudflare anti-bot） | 连续 3 次以上稳定通过 Cloudflare 挑战 |
-| Google / DuckDuckGo / Bing SERP | 稳定可用，持久 profile 下验证码频率较低 |
-
-能力边界：backend **无法稳定通过**以下场景：
-- Cloudflare Turnstile（交互式组件）
-- DataDome / PerimeterX / Akamai Bot Manager
-- 任何必须住宅代理 IP 的站点（数据中心 IP 指纹会触发风控）
-
-这些场景建议将 `searxng-search` / `browser-fetch` 接入 Bright Data、ZenRows、ScrapFly 等 SaaS。
-
-自行验证：
-```bash
-docker exec web-kit-backend pkill -9 -f google-chrome-stable
-time until curl -s 'http://localhost:8082/search?q=test&format=json' \
-            | jq -e '.unresponsive_engines | length == 0' >/dev/null; do sleep 1; done
-```
-
-### 性能
-
-主机回环测试：
-
-| 场景 | P50 | P95 |
-|---|---|---|
-| 串行 SearxNG 搜索 | ~3.6s | ~4.5s |
-| 并发 ×3 | ~9s | ~12s |
-| 局域网跨主机 | ~5.7s | ~5.9s |
-
-运行你自己的基准：
-```bash
-python3 backend/bench/speed-test.py -n 8 --target http://localhost:8082
-```
-
-### 可调配置
-
-| 位置 | 含义 | 默认值 |
-|---|---|---|
-| `searxng-settings/settings.yml` | SearxNG 引擎、secret key、API key | 必填，见 `.example` |
-| `docker-compose.yml` 的 `mem_limit` | 容器内存上限 | 4 GB |
-| `docker-compose.yml` 的 `shm_size` | Chrome 使用的 `/dev/shm` 大小 | 1 GB |
-| 环境变量 `SEARCH_PROXY_CONCURRENCY` | 并行 Chrome 页面数 | 3 |
-| 环境变量 `FAILURE_CACHE_SECONDS` | 引擎隔离时长 | 60s |
-| 环境变量 `PROBE_INTERVAL` | watchdog 探测间隔 | 300s |
-
----
-
-## 仓库结构
-
-```
-.
-├── skill/                       ← AI 技能包
-│   ├── SKILL.md
-│   ├── scripts/
-│   │   ├── searxng-search
-│   │   ├── page                 (browser-fetch page → markdown)
-│   │   └── file                 (browser-fetch file → 原始下载)
-│   └── references/
-│       ├── engines.md
-│       └── workflow.md
-│
-├── backend/                     ← 单容器服务端
-│   ├── Dockerfile
-│   ├── docker-compose.yml
-│   ├── supervisord.conf
-│   ├── server.py                — 含 _ensure_browser() 的 FastAPI search-proxy
-│   ├── start-chrome.sh / start-searxng.sh / start-xvfb.sh
-│   ├── healthcheck.sh, watchdog.sh
-│   ├── searxng-settings/settings.yml.example   ← 实际 settings.yml 已在 gitignore
-│   └── bench/speed-test.py
-│
-├── README.md
-├── LICENSE          (MIT)
-└── .gitignore
-```
-
----
-
-## 许可证
-
-[MIT](./LICENSE)。
+许可证：MIT。

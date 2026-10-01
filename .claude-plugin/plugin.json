@@ -1,27 +1,21 @@
 {
   "name": "web-kit",
-  "description": "Lightweight web search + browser fetch: SearxNG metasearch and Chrome-based page/file retrieval (JS rendering, anti-scrape, auth).",
-  "version": "1.9.0",
+  "description": "Search, read (pages and PDFs), crawl and download the web through a self-hosted, logged-in Chrome via the `webkit` CLI.",
+  "version": "2.0.0",
   "author": {
     "name": "huangyrcn"
   },
   "userConfig": {
-    "cdp_url": {
+    "url": {
       "type": "string",
-      "title": "CDP endpoint",
-      "description": "Chrome DevTools Protocol URL (e.g. http://192.168.1.178:9223)",
-      "default": "http://localhost:9223"
-    },
-    "searxng_url": {
-      "type": "string",
-      "title": "SearxNG endpoint",
-      "description": "SearxNG search engine URL (e.g. http://192.168.1.178:8082)",
+      "title": "web-kit backend URL",
+      "description": "API endpoint of the web-kit v2 backend (e.g. http://192.168.1.178:8082)",
       "default": "http://localhost:8082"
     },
-    "web_kit_api_key": {
+    "api_key": {
       "type": "string",
-      "title": "Gateway API key",
-      "description": "X-API-Key for the web-kit auth gateway; also the noVNC HTTP Basic Auth password (username: webkit). Generate with: openssl rand -hex 32",
+      "title": "API key",
+      "description": "X-API-Key for /v2/* (WEBKIT_API_KEY on the backend)",
       "default": ""
     }
   }

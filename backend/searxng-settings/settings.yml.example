@@ -1,16 +1,47 @@
-use_default_settings: true
-server:
-  secret_key: 'CHANGE_ME_e.g._run_openssl_rand_-hex_32'
-  limiter: false
-  image_proxy: true
-  methods: ['GET', 'POST']
+# SearXNG for web-kit v2: serves ONLY the API-backed engines.
+# Google / DuckDuckGo / Google Scholar / Semantic Scholar / arXiv are scraped by
+# webkit-api through Chrome and are deliberately not configured here.
+# webkit-api reaches this instance on 127.0.0.1:8080 only.
+#
+# server.secret_key comes from the SEARXNG_SECRET environment variable.
 
-redis:
+use_default_settings:
+  engines:
+    keep_only:
+      - bing
+      - openalex
+      - pubmed
+      - github
+      - github code
+      - gitlab
+      - huggingface
+      - pypi
+      - npm
+      - crates.io
+      - lib.rs
+      - pkg.go.dev
+      - sourcehut
+      - microsoft learn
+      - nvd
+      - hackernews
+      - stackoverflow
+      - wikidata
+      - annas archive
+      - zlibrary
+
+server:
+  secret_key: "set-via-SEARXNG_SECRET"
+  limiter: false
+  image_proxy: false
+  public_instance: false
+  methods: ["GET"]
+
+valkey:
   url: false
 
 search:
   default_lang: "en"
-  formats: ['html', 'csv', 'json', 'rss']
+  formats: ["json"]
   suspended_times:
     SearxEngineAccessDenied: 60
     SearxEngineCaptcha: 120
@@ -26,90 +57,13 @@ outgoing:
   enable_http2: true
 
 engines:
-  # === General search (3 engines) ===
-  - name: google
-    engine: json_engine
-    shortcut: go
-    search_url: http://localhost:3100/google?q={query}&limit=10
-    enable_http: true
-    results_query: results
-    url_query: url
-    title_query: title
-    content_query: content
-    categories: [general]
-    disabled: false
-    timeout: 15.0
-    paging: false
-
   - name: bing
     engine: bing
     disabled: false
     send_accept_language_header: true
 
-  - name: duckduckgo
-    engine: json_engine
-    shortcut: dd
-    search_url: http://localhost:3100/ddg?q={query}&limit=10
-    enable_http: true
-    results_query: results
-    url_query: url
-    title_query: title
-    content_query: content
-    categories: [general]
-    disabled: false
-    timeout: 20.0
-    paging: false
-
-  # === Science search (6 engines) ===
-  - name: semantic scholar
-    engine: json_engine
-    shortcut: se
-    search_url: http://localhost:3100/semantic_scholar?q={query}&limit=10
-    enable_http: true
-    results_query: results
-    url_query: url
-    title_query: title
-    content_query: content
-    categories: [science]
-    disabled: false
-    timeout: 25.0
-    paging: false
-
-  - name: arxiv
-    engine: json_engine
-    shortcut: arx
-    search_url: http://localhost:3100/arxiv?q={query}&limit=10
-    enable_http: true
-    results_query: results
-    url_query: url
-    title_query: title
-    content_query: content
-    categories: [science]
-    disabled: false
-    timeout: 30.0
-    paging: false
-
-  - name: google scholar
-    engine: json_engine
-    shortcut: gos
-    search_url: http://localhost:3100/google_scholar?q={query}&limit=10
-    enable_http: true
-    results_query: results
-    url_query: url
-    title_query: title
-    content_query: content
-    categories: [science]
-    disabled: false
-    timeout: 20.0
-    paging: false
-
   - name: openalex
     engine: openalex
-    disabled: false
-
-  - name: dblp
-    engine: dblp
-    shortcut: dblp
     disabled: false
 
   - name: pubmed
@@ -117,92 +71,19 @@ engines:
     shortcut: pm
     disabled: false
 
-  # === Disabled engines (explicit) ===
-  - name: base
-    engine: base
-    shortcut: bas
-    disabled: true
-
-  - name: crossref
-    engine: crossref
-    disabled: true
-
-  - name: core
-    engine: core
-    shortcut: core
-    api_key: "YOUR_CORE_API_KEY"
-    disabled: true
-
-  - name: doaj
-    engine: doaj
-    shortcut: doaj
-    disabled: true
-
-  - name: pdbe
-    engine: pdbe
-    shortcut: pdb
-    disabled: true
-
-  - name: openairedatasets
-    disabled: true
-
-  - name: openairepublications
-    disabled: true
-
-  - name: brave
-    engine: brave
-    disabled: true
-
-  - name: startpage
-    engine: startpage
-    disabled: true
-
-  - name: qwant
-    engine: qwant
-    disabled: true
-
-  - name: mojeek
-    engine: mojeek
-    disabled: true
-
-  - name: yahoo
-    engine: yahoo
-    disabled: true
-
-  - name: yandex
-    engine: yandex
-    disabled: true
-
-  - name: wikipedia
-    engine: wikipedia
-    disabled: true
-
-  - name: openlibrary
-    engine: openlibrary
-    disabled: true
-
-  - name: stackexchange
-    engine: stackexchange
-    shortcut: stx
-    disabled: true
-
-  # === IT & dev ===
   - name: github
     engine: github
     shortcut: gh
     disabled: false
 
+  # Code search needs a token: https://github.com/settings/tokens (no scopes).
   - name: github code
     engine: github_code
     shortcut: ghc
-    disabled: false
+    disabled: true
     ghc_auth:
       type: "token"
       token: "YOUR_GITHUB_PERSONAL_ACCESS_TOKEN"
-
-  - name: hackernews
-    engine: hackernews
-    disabled: false
 
   - name: gitlab
     engine: gitlab
@@ -210,6 +91,10 @@ engines:
 
   - name: huggingface
     engine: huggingface
+    disabled: false
+
+  - name: pypi
+    engine: pypi
     disabled: false
 
   - name: npm
@@ -240,11 +125,22 @@ engines:
     engine: nvd
     disabled: false
 
-  - name: pypi
-    engine: pypi
+  - name: hackernews
+    engine: hackernews
     disabled: false
 
-  # === Books/library ===
+  - name: stackoverflow
+    engine: stackexchange
+    shortcut: st
+    api_site: "stackoverflow"
+    categories: [it, q&a]
+    disabled: false
+
+  - name: wikidata
+    engine: wikidata
+    shortcut: wd
+    disabled: false
+
   - name: annas archive
     engine: annas_archive
     disabled: false
@@ -252,14 +148,4 @@ engines:
   - name: zlibrary
     engine: zlibrary
     shortcut: zlib
-    disabled: false
-
-  # === Social/discussion ===
-  - name: reddit
-    engine: reddit
-    disabled: false
-
-  - name: wikidata
-    engine: wikidata
-    shortcut: wd
     disabled: false

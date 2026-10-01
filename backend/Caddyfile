@@ -1,37 +1,63 @@
 {
 	admin off
 	auto_https off
-	# SECURITY: WEB_KIT_API_KEY and WEB_KIT_NOVNC_HASH must be non-empty at startup.
-	# An empty WEB_KIT_API_KEY would make the X-API-Key matcher accept header-less
-	# requests (silent-open). start-caddy.sh and docker-compose enforce non-empty.
+	# start-caddy.sh refuses to start unless WEBKIT_API_KEY, WEBKIT_ADMIN_KEY and
+	# WEBKIT_NOVNC_HASH are all non-empty: an empty key would make the header
+	# matchers accept header-less requests.
 }
 
-# Port A — SearxNG (HTTP, X-API-Key header)
+# API — the only port clients need.
+#   /v2/admin/*  X-Admin-Key
+#   /v2/*        X-API-Key
+#   anything else (SearXNG, /internal/*) is not reachable from outside.
 :8082 {
-	@authed header X-API-Key "{$WEB_KIT_API_KEY}"
-	handle @authed {
-		reverse_proxy localhost:8080
+	@admin path /v2/admin/*
+	handle @admin {
+		@admin_ok header X-Admin-Key "{$WEBKIT_ADMIN_KEY}"
+		handle @admin_ok {
+			reverse_proxy 127.0.0.1:3100
+		}
+		handle {
+			header Content-Type application/json
+			respond `{"error":"unauthorized","message":"X-Admin-Key required"}` 401
+		}
 	}
+
+	@api path /v2/*
+	handle @api {
+		@api_ok header X-API-Key "{$WEBKIT_API_KEY}"
+		handle @api_ok {
+			reverse_proxy 127.0.0.1:3100 {
+				flush_interval -1
+			}
+		}
+		handle {
+			header Content-Type application/json
+			respond `{"error":"unauthorized","message":"X-API-Key required"}` 401
+		}
+	}
+
 	handle {
-		respond "unauthorized" 401
+		header Content-Type application/json
+		respond `{"error":"not_found","message":"only /v2/* is served"}` 404
 	}
 }
 
-# Port B — Chrome CDP (WebSocket + HTTP, X-API-Key header)
-:9223 {
-	@authed header X-API-Key "{$WEB_KIT_API_KEY}"
-	handle @authed {
-		reverse_proxy localhost:9224
-	}
-	handle {
-		respond "unauthorized" 401
-	}
-}
-
-# Port C — noVNC (browser, HTTP Basic Auth, password = same key)
+# noVNC for manual logins / CAPTCHAs (HTTP Basic Auth: webkit / WEBKIT_ADMIN_KEY).
 :6080 {
 	basic_auth {
-		webkit {$WEB_KIT_NOVNC_HASH}
+		webkit {$WEBKIT_NOVNC_HASH}
 	}
-	reverse_proxy localhost:6081
+	reverse_proxy 127.0.0.1:6081
+}
+
+# Raw Chrome CDP, admin only (debugging).
+:9223 {
+	@cdp_ok header X-Admin-Key "{$WEBKIT_ADMIN_KEY}"
+	handle @cdp_ok {
+		reverse_proxy 127.0.0.1:9222
+	}
+	handle {
+		respond "unauthorized" 401
+	}
 }
