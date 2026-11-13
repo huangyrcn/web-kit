@@ -358,19 +358,40 @@ _S2_EXTRACT_JS = r"""
 """
 
 
+# Every Semantic Scholar page embeds the AWS WAF token script, so "awswaf" and
+# "challenge" are in normal result pages too and must not count as a wall. The
+# silent WAF challenge (HTTP 202, x-amzn-waf-action: challenge) clears itself in
+# Chrome and reloads into the results (observed ~6-12 s on 2026-11-13); only an
+# interactive CAPTCHA needs a person (its 405 form is caught by _is_wall_response).
+_S2_WALL_MARKERS = ("checking if the site connection is secure", "enable javascript and cookies to continue",
+                    "cf-challenge", "captcha", "human verification")
+S2_RESULTS_TIMEOUT_MS = 30000
+
+
 def s2_is_blocked(page, content: str) -> bool:
     cl = content.lower()
-    return ("checking if the site connection is secure" in cl
-            or "enable javascript and cookies to continue" in cl
-            or "cf-challenge" in cl or "g-recaptcha" in cl or "awswaf" in cl or "human verification" in cl)
+    return any(m in cl for m in _S2_WALL_MARKERS)
 
 
 async def semantic_scholar(q: str, limit: int, time_range: str | None = None, lang: str | None = None) -> list[dict]:
     url = f"https://www.semanticscholar.org/search?q={quote_plus(q)}&sort=relevance"
 
     async def parse(page) -> list[dict]:
-        if not await _wait_results(page, ".cl-paper-row", "semantic_scholar",
-                                   ("no results", "did not match"), timeout=15000):
+        try:
+            found = await _wait_results(page, ".cl-paper-row", "semantic_scholar",
+                                        ("no results", "did not match"), timeout=S2_RESULTS_TIMEOUT_MS)
+        except WebkitError:
+            try:
+                content = await page.content()
+            except Exception:  # noqa: BLE001 - still navigating: keep the original error
+                content = ""
+            if s2_is_blocked(page, content):
+                raise WebkitError(
+                    "captcha", "semantic_scholar served a CAPTCHA/challenge page",
+                    hint="this engine wants a person; another engine or profile, or WebSearch, may still answer",
+                ) from None
+            raise
+        if not found:
             return []
         results, seen = [], set()
         for item in await page.evaluate(_S2_EXTRACT_JS) or []:

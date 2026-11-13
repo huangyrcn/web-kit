@@ -236,6 +236,14 @@ def test_wall_response_detection():
     assert not serp._is_wall_response(R(200), "captcha")
 
 
+def test_s2_wall_ignores_the_embedded_waf_token_script():
+    # Normal S2 result pages and the silent 202 challenge both carry these strings.
+    normal = '<script src="https://x.token.awswaf.com/x/challenge.js"></script><div class="cl-paper-row">'
+    assert not serp.s2_is_blocked(None, normal)
+    assert serp.s2_is_blocked(None, '<div id="captcha-container"></div><script src="x.awswaf.com/captcha.js">')
+    assert serp.s2_is_blocked(None, "<title>Just a moment...</title> Checking if the site connection is secure")
+
+
 def test_decode_handles_io_read_and_fetch_bodies():
     from webkit_api.download import _decode
     import base64
