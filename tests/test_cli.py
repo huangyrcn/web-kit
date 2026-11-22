@@ -60,6 +60,7 @@ def server():
 @pytest.fixture(autouse=True)
 def env(server, monkeypatch, tmp_path):
     ROUTES.clear()
+    monkeypatch.setenv("WEBKIT_BACKEND", "remote")  # these tests drive the HTTP client against a fake backend
     monkeypatch.setenv("WEBKIT_URL", server)
     monkeypatch.setenv("WEBKIT_API_KEY", KEY)
     monkeypatch.setenv("WEBKIT_ADMIN_KEY", ADMIN)

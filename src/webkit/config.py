@@ -1,10 +1,14 @@
 """Where the backend is and which keys to send.
 
 Precedence: command-line flags > environment > config file > defaults.
-  env:  WEBKIT_URL, WEBKIT_API_KEY, WEBKIT_ADMIN_KEY, WEBKIT_VNC_URL, WEBKIT_DOWNLOAD_DIR,
-        WEBKIT_CACHE_DIR
+  env:  WEBKIT_BACKEND, WEBKIT_OPENCLI, WEBKIT_PROFILE, WEBKIT_S2_API_KEY,
+        WEBKIT_URL, WEBKIT_API_KEY, WEBKIT_ADMIN_KEY, WEBKIT_VNC_URL, WEBKIT_DOWNLOAD_DIR, WEBKIT_CACHE_DIR
         (Claude plugin userConfig arrives as CLAUDE_PLUGIN_OPTION_URL / _API_KEY / _ADMIN_KEY)
-  file: ~/.config/web-kit/config.toml  (or $WEBKIT_CONFIG), keys: url, api_key, admin_key, vnc_url
+  file: ~/.config/web-kit/config.toml  (or $WEBKIT_CONFIG), keys: backend, opencli, profile, s2_api_key,
+        url, api_key, admin_key, vnc_url
+
+backend = "local" (default) runs every command on this machine through opencli and this
+machine's Chrome (local.py); "remote" talks to a web-kit backend at `url` with `api_key`.
 """
 
 from __future__ import annotations
@@ -16,12 +20,17 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 DEFAULT_URL = "http://localhost:8082"
-KEYS = ("url", "api_key", "admin_key", "vnc_url")
+DEFAULT_BACKEND = "local"
+KEYS = ("backend", "opencli", "profile", "s2_api_key", "url", "api_key", "admin_key", "vnc_url")
 _ENV = {
     "url": ("WEBKIT_URL", "CLAUDE_PLUGIN_OPTION_URL"),
     "api_key": ("WEBKIT_API_KEY", "CLAUDE_PLUGIN_OPTION_API_KEY"),
     "admin_key": ("WEBKIT_ADMIN_KEY", "CLAUDE_PLUGIN_OPTION_ADMIN_KEY"),
     "vnc_url": ("WEBKIT_VNC_URL",),
+    "backend": ("WEBKIT_BACKEND",),
+    "opencli": ("WEBKIT_OPENCLI",),
+    "profile": ("WEBKIT_PROFILE",),
+    "s2_api_key": ("WEBKIT_S2_API_KEY",),
 }
 
 
@@ -80,6 +89,10 @@ class Config:
     api_key: str = ""
     admin_key: str = ""
     vnc_url: str = ""
+    backend: str = DEFAULT_BACKEND   # "local" | "remote"
+    opencli: str = ""                # path of the opencli executable (default: from PATH)
+    profile: str = ""                # opencli profile alias (default: opencli's own default)
+    s2_api_key: str = ""             # Semantic Scholar API key, passed to opencli
     sources: dict = field(default_factory=dict)  # key -> "flag" | "env:NAME" | "file" | "default"
 
     @property
@@ -107,7 +120,7 @@ def load(flags: dict | None = None) -> Config:
             setattr(cfg, key, file_values[key])
             cfg.sources[key] = "file"
         else:
-            cfg.sources[key] = "default" if key == "url" else "unset"
+            cfg.sources[key] = "default" if key in ("url", "backend") else "unset"
     cfg.url = cfg.url.rstrip("/")
     return cfg
 

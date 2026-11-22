@@ -10,14 +10,15 @@ from . import API_VERSION, __version__
 
 _HEADER = """---
 name: web-kit
-description: "Fallback web access through a self-hosted, logged-in Chrome (`webkit` CLI), for when the built-in web tools fail or cannot do the job. Use when web search is out of quota or erroring (\\"Web search was not performed\\"); a page read fails (403, 429, timeout, too large, unsupported type) or returns a verification or login page instead of content (\\"Just a moment\\", \\"请稍候\\", \\"Verify you are human\\", reCAPTCHA, OpenReview or Cloudflare checks, a /challenge redirect, HTML where a PDF was expected); you need a page's exact full text or a PDF's text and the built-in reader only summarizes; you need the file itself (a paper PDF by URL, DOI or arXiv ID); or you need Google Scholar, Semantic Scholar or arXiv results. 读不了、被拦、验证页、下载论文 PDF、原文全文。 Not the default for search or reading; never for posting, submitting forms, purchases or account changes."
+description: "Fallback web access through the user's own logged-in Chrome on this machine (`webkit` CLI, via opencli), for when the built-in web tools fail or cannot do the job. Use when web search is out of quota or erroring (\\"Web search was not performed\\"); a page read fails (403, 429, timeout, too large, unsupported type) or returns a verification or login page instead of content (\\"Just a moment\\", \\"请稍候\\", \\"Verify you are human\\", reCAPTCHA, OpenReview or Cloudflare checks, a /challenge redirect, HTML where a PDF was expected); you need a page's exact full text or a PDF's text and the built-in reader only summarizes; you need the file itself (a paper PDF by URL, DOI or arXiv ID); or you need Google Scholar, Semantic Scholar or arXiv results. 读不了、被拦、验证页、下载论文 PDF、原文全文。 Not the default for search or reading; never for posting, submitting forms, purchases or account changes."
 ---
 
 # web-kit (`webkit` CLI {version}, API {api})
 
 Use the built-in web tools first (Claude Code: WebSearch / WebFetch; Codex: web search / open /
-find). web-kit takes over when they fail, are blocked or out of quota, or cannot do the job. It is
-a real Chrome on a server, logged in to the sites the user has passed once.
+find). web-kit takes over when they fail, are blocked or out of quota, or cannot do the job. It
+drives the user's own Chrome on this machine (their logins, their network) through opencli.
+Use `webkit` only: never call `opencli` yourself.
 
 ## Which command
 
@@ -45,10 +46,13 @@ Want to know what it says: `read`. Need the file: `download`.
 ## When web-kit fails
 
 - Exit 6 (needs a person) or 8 (blocked): do not retry and do not wait. Report the URL as "not
-  accessible" and continue with other sources. (A person can pass exit-6 pages in noVNC; passes on
-  Cloudflare sites can expire within ~30 minutes.)
+  accessible" and continue with other sources. (A person can pass exit-6 pages in Chrome on this
+  machine.)
 - Exit 7 (busy): retry in a minute; do not start more parallel `webkit` calls.
-- Exit 3: retry once at most, then report. Exit 4 / 5: run `webkit doctor` and report.
+- Exit 3: retry once at most, then report. Error `browser_conflict`: another Chrome extension
+  (Immersive Translate, Zotero, ...) blocks automation on that page: use another source.
+- Exit 5: Chrome with the OpenCLI extension is not running or not connected: ask the user to open
+  Chrome, then run `webkit doctor`.
 - Errors are one JSON line on stderr; its `hint` says what to do next.
 
 ## Rules
@@ -61,9 +65,11 @@ Want to know what it says: `read`. Need the file: `download`.
   `grep -n -m 10 'term' FILE | cut -c1-200`; then read only those line ranges (your file-reading
   tool with an offset and a limit, or `sed -n 'START,ENDp' FILE | cut -c1-500`). Never `cat` a
   whole page, paper or saved output.
-- `search` output starts with `# engines google=ok:8 duckduckgo=skipped ...`. `error:network` on
-  every engine means the backend lost its route out: say so, do not guess results.
-- One shared browser and one exit IP serve every agent: no bulk searching, few parallel calls.
+- `search` output starts with `# engines google=ok:8 brave=skipped ...`. `error:unreachable` on
+  every engine means Chrome is not connected: say so, do not guess results.
+- One browser (the user's) and one exit IP serve every agent: no bulk searching, few parallel calls.
+- PDFs are fetched directly, without browser cookies: paywalled publisher PDFs fail (exit 8); prefer
+  arXiv, PMC or other open copies.
 
 ## Typical use
 
@@ -75,12 +81,12 @@ grep -n -i -m 10 "ablation" paper.md | cut -c1-200                  # locate, th
 webkit read --pdf -o paper.md 10.1145/3774904.3792101                # DOI -> paper page -> its PDF, as text
 webkit read arXiv:2403.01092                                         # the abstract page
 webkit download arXiv:2403.01092                                     # the PDF file
-webkit download -o papers/ https://dl.acm.org/doi/pdf/10.1145/3774904.3792101
-webkit status                                                        # which engines / egress work now
+webkit search -e dblp "graph transformers"                          # also: pubmed, hackernews, stackoverflow
+webkit status                                                        # is the local Chrome connected
 ```
 
-Setup: `uv tool install git+https://github.com/huangyrcn/web-kit`, then `webkit config set url URL`,
-`webkit config set api-key` (key on stdin), `webkit skill install [--agent codex]`.
+Setup: `uv tool install git+https://github.com/huangyrcn/web-kit`, `npm install -g @jackwener/opencli`,
+the OpenCLI extension in Chrome, then `webkit doctor` and `webkit skill install [--agent codex]`.
 When anything fails, run `webkit doctor` first. Every option of every command:
 `reference.md` next to this file, or `webkit <command> --help`.
 """

@@ -2,18 +2,15 @@
 
 [English](./README.md)
 
-AI Agent 上网的兜底通道：Agent 内置的网页工具失败、被拦、额度用尽或做不到时，通过服务器上一个真实的、已登录的 Chrome 完成**搜索、读网页、爬取、下载**。Agent 只调用一个很小的 CLI（`webkit`），浏览器的活都在服务端。
+AI Agent 上网的兜底通道：Agent 内置的网页工具失败、被拦、额度用尽或做不到时，通过 Agent 所在机器上你自己的、已登录的 Chrome 完成**搜索、读网页、下载**。Agent 只调用一个很小的 CLI（`webkit`），它通过 [opencli](https://github.com/jackwener/opencli) 驱动这台 Chrome。
 
 ```
- Agent ──► webkit CLI ──HTTP + key──►  后端容器（只开一个 API 端口）
-                                        ├─ Caddy（鉴权）
-                                        ├─ webkit-api ── Chrome（持久化配置，patchright）
-                                        │                 └─ 读网页用 crawl4ai，下载走 CDP
-                                        ├─ SearXNG（API 型引擎：github、pypi、openalex 等）
-                                        └─ noVNC（管理员：手动登录或过一次验证码）
+ Agent ──► webkit CLI ──► opencli 站点适配、`opencli web read` ──► OpenCLI 插件 ──► 你的 Chrome
+             │             （搜索引擎、网页转 Markdown）                          （你的登录状态、你的 IP）
+             └─► urllib + pdftotext（PDF 和文件直接下载）
 ```
 
-和普通元搜索或爬虫服务的区别：web-kit 在服务端保留**你自己的**浏览器身份（cookie、登录状态），用这个浏览器去抓 Google、DuckDuckGo、Google Scholar、Semantic Scholar、arXiv 这几个关键引擎，并逐个汇报每个引擎的结果，空结果不会含糊不清。
+`webkit` 保持 Agent 依赖的约定：只读命令、告诉 Agent 下一步怎么做的退出码、逐个引擎汇报结果、回退链、有上限的输出，验证页永远不会当成正文返回。它只调用 opencli 的**只读**命令，而且只走适配这条路（先在空白页附着、复用常驻标签页、从不在页面里执行脚本）。服务器后端仍然可以用：`backend = "remote"`（见下文"远端模式"）。
 
 ## 定位
 
@@ -30,14 +27,15 @@ AI Agent 上网的兜底通道：Agent 内置的网页工具失败、被拦、�
 | `webkit read` | 网址、DOI、`arXiv:ID` | 网页或 PDF 的文本 | 了解内容写了什么（`--pdf`：读论文页对应的 PDF） |
 | `webkit download` | 网址、DOI、`arXiv:ID` | 存到本地的文件（只打印路径） | 保存或交付文件；论文页会自动解析到它的 PDF |
 
-不适用：内置工具已经能做好的事、大批量检索、点击或填表。所有客户端共用一个 Chrome（`WEBKIT_MAX_PAGES`，默认 5 个页面，超出后返回退出码 7「忙」），所有流量都从后端主机的出口出去，并发用得多会让大家都更容易遇到验证码。
+不适用：内置工具已经能做好的事、大批量检索、点击或填表。这台机器上的所有 Agent 共用你的 Chrome 和你的 IP，并发用得多会让你自己的账号更容易遇到验证码。
 
-## 客户端
+## 安装（本机模式，默认）
 
 ```bash
 uv tool install git+https://github.com/huangyrcn/web-kit     # 升级：uv tool upgrade web-kit
-webkit config set url http://your-server:8082
-webkit config set api-key            # 从标准输入读取 key
+npm install -g @jackwener/opencli    # 然后在 Chrome 里装 OpenCLI 插件（Chrome 应用商店）
+webkit config set profile main       # 可选：opencli 的 profile 别名（`opencli profile list`）
+webkit config set s2-api-key         # 可选，从标准输入读取：Semantic Scholar API key
 webkit doctor
 webkit skill install                 # 生成与当前 CLI 版本一致的 ~/.claude/skills/web-kit/SKILL.md
 webkit skill install --agent codex   # 生成 ~/.codex/skills/web-kit/（SKILL.md + reference.md）
@@ -60,7 +58,11 @@ webkit status                                  # 浏览器、出网、各引擎�
 
 输出有总量预算，正文不会大量涌入 agent 的上下文：每条命令的标准输出和标准错误合计最多 `--max-chars` 个字符（默认 4000，上限 20000）。较长的页面保存到 `~/.cache/web-kit/pages/`，只打印预览和文件路径；用了 `-o` 就只打印路径；其余放不下的内容（长列表、大量错误）写入一个文件，最后一行给出路径；`--json` 只改变格式，不改变输出量。
 
-## 后端
+本机模式说明：Chrome 要开着（否则退出码 5）。会往网页里嵌自己页面的扩展（沉浸式翻译、Zotero、Scholar PDF Reader）会让这些页面无法被自动化（错误 `browser_conflict`）。可用引擎见 `webkit engines`（本机模式没有时间过滤）。PDF 直接下载、不带浏览器 cookie，付费出版商的 PDF 会失败。`crawl` 和 `read -f html` 需要远端后端。
+
+## 远端模式（服务器后端）
+
+`webkit config set backend remote`、`webkit config set url http://your-server:8082`、`webkit config set api-key`（从标准输入读取）。后端：
 
 ```bash
 cd backend
@@ -68,6 +70,8 @@ cp .env.example .env && chmod 600 .env      # key、端口、监听地址
 cp searxng-settings/settings.yml.example searxng-settings/settings.yml
 docker compose up -d --build
 ```
+
+可选：在 `.env` 里设置 `WEBKIT_S2_API_KEY`（[免费申请](https://www.semanticscholar.org/product/api#api-key)）。设置后 `semantic_scholar` 引擎先调用官方 Graph API（全局每秒最多一次），API 出任何错误再改用网页；不设置则只用网页。
 
 - `8082`：API（`X-API-Key`；`/v2/admin/*` 需要 `X-Admin-Key`）
 - `6080`：noVNC，仅管理员使用（用户名 `webkit`，密码为管理 key）。在这里登录一次网站，cookie 会保存在 `chrome-profile` 卷里

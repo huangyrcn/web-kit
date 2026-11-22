@@ -7,7 +7,7 @@ Generated from `webkit <command> --help`. When to use which command: SKILL.md.
 
 ```
 usage: webkit search [-h] [--url URL] [--timeout TIMEOUT] [--json]
-                     [--max-chars N] [-p {general,academic,code,community}]
+                     [--max-chars N] [-p {general,academic,community}]
                      [-e ENGINE] [-n LIMIT] [--time {day,week,month,year}]
                      [--lang LANG] [--urls] [--read N] [-o DIR]
                      query [query ...]
@@ -27,11 +27,10 @@ options:
   --max-chars N         most characters this command prints (default 4000, at
                         most 20000); longer text goes to a file and its path
                         is printed
-  -p, --profile {general,academic,code,community}
-                        engine chain: general=google>duckduckgo>bing, academic
-                        =semantic_scholar>google_scholar>openalex>arxiv,
-                        code=github>google, community=hackernews>stackoverflow
-                        (default: general)
+  -p, --profile {general,academic,community}
+                        engine chain: general=google>brave, academic=semantic_
+                        scholar>google_scholar>openalex>arxiv,
+                        community=hackernews>stackoverflow (default: general)
   -e, --engine ENGINE   use exactly this engine (see `webkit engines`)
   -n, --limit LIMIT     max results (default 10)
   --time {day,week,month,year}
@@ -116,8 +115,8 @@ options:
   -o, --output PATH     target file or directory
   --max-mb MAX_MB       size limit in MB (default: backend limit)
   --allow-html          save a web page as-is instead of resolving its PDF
-  --wait-human          only with a person at noVNC: open the page there and
-                        retry until they pass the check
+  --wait-human          only with a person at the browser: they pass the check
+                        in Chrome, webkit retries meanwhile
   --wait-timeout WAIT_TIMEOUT
                         seconds to wait with --wait-human (default 300)
 

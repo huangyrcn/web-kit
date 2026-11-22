@@ -2,24 +2,23 @@
 
 [中文](./README.zh-CN.md)
 
-Fallback web access for AI agents: **search, read, crawl, download** through a
-real, logged-in Chrome on your server, for when the agent's built-in web tools
-fail, are blocked or out of quota, or cannot do the job. Agents use a small CLI
-(`webkit`); the server does all the browsing.
+Fallback web access for AI agents: **search, read, download** through the real,
+logged-in Chrome on the agent's own machine, for when the agent's built-in web
+tools fail, are blocked or out of quota, or cannot do the job. Agents use a small
+CLI (`webkit`); it drives that Chrome through [opencli](https://github.com/jackwener/opencli).
 
 ```
- agent ──► webkit CLI ──HTTP + key──►  backend container (one API port)
-                                        ├─ Caddy (auth)
-                                        ├─ webkit-api ── Chrome (persistent profile, patchright)
-                                        │                 └─ crawl4ai for pages, CDP for downloads
-                                        ├─ SearXNG (API engines: github, pypi, openalex, ...)
-                                        └─ noVNC (admin: log in / solve a CAPTCHA once)
+ agent ──► webkit CLI ──► opencli adapters, `opencli web read` ──► OpenCLI extension ──► your Chrome
+             │             (search engines, pages as Markdown)                         (your logins, your IP)
+             └─► urllib + pdftotext   (PDFs and files, fetched directly)
 ```
 
-Why not just a metasearch box or a crawler service: web-kit keeps *your* browser
-identity (cookies, logins) on the server, scrapes the engines that matter
-(Google, DuckDuckGo, Google Scholar, Semantic Scholar, arXiv) with that browser,
-and reports every engine's outcome so an empty answer is never ambiguous.
+`webkit` keeps the contract agents rely on: read-only commands, exit codes that
+say what to do next, every engine's outcome reported, fallback chains, a bounded
+output, and verification pages never returned as content. It runs only opencli
+*read* commands, as adapters (they attach to a blank tab, reuse warm tabs and
+never evaluate a page script). A server backend is still supported as
+`backend = "remote"` ([below](#remote-mode-server-backend)).
 
 ## Positioning
 
@@ -40,16 +39,16 @@ takes over when:
 | `webkit download` | URL, DOI, `arXiv:ID` | the file on disk (path printed) | keep or hand over the file; a paper page resolves to its PDF |
 
 Not for: anything the built-in tools already did fine, bulk discovery, clicking or
-filling forms. One shared Chrome serves every client (`WEBKIT_MAX_PAGES`, default 5;
-beyond that exit 7 *busy*) and all traffic leaves through the backend host's egress,
-so heavy parallel use raises CAPTCHA risk for everyone.
+filling forms. Your Chrome and your IP serve every agent on the machine: heavy
+parallel use raises CAPTCHA risk on your own accounts.
 
-## Client
+## Setup (local mode, the default)
 
 ```bash
 uv tool install git+https://github.com/huangyrcn/web-kit     # update: uv tool upgrade web-kit
-webkit config set url http://your-server:8082
-webkit config set api-key            # reads the key from stdin
+npm install -g @jackwener/opencli    # then add the OpenCLI extension to Chrome (Chrome Web Store)
+webkit config set profile main       # optional: the opencli profile alias (`opencli profile list`)
+webkit config set s2-api-key         # optional, from stdin: Semantic Scholar API key
 webkit doctor
 webkit skill install                 # ~/.claude/skills/web-kit/SKILL.md for this CLI version
 webkit skill install --agent codex   # ~/.codex/skills/web-kit/ (SKILL.md + reference.md)
@@ -81,7 +80,16 @@ path is printed; with `-o` only paths are printed; whatever else does not fit (l
 many errors) goes to one file named in the last line; `--json` changes the format, never
 the amount.
 
-## Backend
+Local-mode notes: keep Chrome open (exit 5 otherwise). Extensions that embed their
+own pages in sites (Immersive Translate, Zotero, Scholar PDF Reader) block browser
+automation on those pages (error `browser_conflict`). Engines: `webkit engines`
+(no time filters locally). PDFs are fetched without browser cookies, so paywalled
+publisher PDFs fail. `crawl` and `read -f html` need the remote backend.
+
+## Remote mode (server backend)
+
+`webkit config set backend remote`, `webkit config set url http://your-server:8082`,
+`webkit config set api-key` (stdin). The backend:
 
 ```bash
 cd backend
@@ -89,6 +97,8 @@ cp .env.example .env && chmod 600 .env      # keys, ports, bind address
 cp searxng-settings/settings.yml.example searxng-settings/settings.yml
 docker compose up -d --build
 ```
+
+Optional: set `WEBKIT_S2_API_KEY` in `.env` ([free key](https://www.semanticscholar.org/product/api#api-key)). The `semantic_scholar` engine then asks the Graph API first, at most one request per second, and falls back to the website on any API failure; without a key it uses the website only.
 
 - `8082` API (`X-API-Key`; `/v2/admin/*` needs `X-Admin-Key`)
 - `6080` noVNC, admin only (user `webkit`, password = admin key): log in to sites once; cookies persist in the `chrome-profile` volume

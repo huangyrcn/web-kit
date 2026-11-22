@@ -32,8 +32,9 @@ from urllib.parse import unquote, urlparse
 
 from . import API_VERSION, __version__, config
 from .client import (EXIT_FAILED, EXIT_NO_RESULTS, EXIT_OK, EXIT_USAGE, ApiError, Client)
+from .local import LocalClient
 
-PROFILES = ("general", "academic", "code", "community")
+PROFILES = ("general", "academic", "community")
 TIME_RANGES = ("day", "week", "month", "year")
 DEFAULT_BUDGET = 4000   # chars a content command prints (search / read / crawl / download)
 MAX_BUDGET = 20000      # hard ceiling for --max-chars; full text only ever goes to files
@@ -185,12 +186,13 @@ def engines_header(report: list[dict]) -> str:
     parts = []
     for e in report:
         st = e.get("status")
+        name = e["engine"]
         if st == "ok":
-            parts.append(f"{e['engine']}=ok:{e.get('count', 0)}")
+            parts.append(f"{name}=ok:{e.get('count', 0)}")
         elif st == "error":
-            parts.append(f"{e['engine']}=error:{e.get('error', 'unknown')}")
+            parts.append(f"{name}=error:{e.get('error', 'unknown')}")
         else:
-            parts.append(f"{e['engine']}={st}")
+            parts.append(f"{name}={st}")
     return "# engines " + " ".join(parts)
 
 
@@ -434,6 +436,8 @@ def _download_once(client: Client, url: str, dest: Path | None, max_mb: int, all
 
 def cmd_download(args, client: Client) -> int:
     dest = Path(args.output).expanduser() if args.output else None
+    if dest is not None and args.output.endswith(("/", os.sep)):  # Path() drops the slash that marks a directory
+        dest.mkdir(parents=True, exist_ok=True)
     url = normalize_target(args.url)
     deadline = time.monotonic() + args.wait_timeout
     opened = False
@@ -456,6 +460,10 @@ def cmd_download(args, client: Client) -> int:
 
 
 def _open_for_human(client: Client, url: str) -> None:
+    if getattr(client, "local", False):
+        OUT.write(f"human action needed: open {url} in Chrome on this machine and pass the check; "
+                  "retrying every 10s", stream=sys.stderr)
+        return
     if client.cfg.admin_key:
         try:
             client.get_json("/v2/admin/open", {"url": url}, admin=True, timeout=60)
@@ -467,6 +475,15 @@ def _open_for_human(client: Client, url: str) -> None:
 
 def cmd_status(args, client: Client) -> int:
     data = client.get_json("/v2/status", timeout=args.timeout or 30)
+    if getattr(client, "local", False):
+        ok = bool(data.get("opencli") and data.get("extension_connected"))
+        if args.json:
+            print_json(data)
+        else:
+            out(f"web-kit {data.get('webkit')} (api {data.get('api')}), local mode: this machine's Chrome via opencli")
+            for _, line in _local_lines(data):
+                out(line)
+        return EXIT_OK if ok else EXIT_FAILED
     if args.json:
         print_json(data)
         return EXIT_OK if data.get("ok") else EXIT_FAILED
@@ -502,6 +519,19 @@ def cmd_status(args, client: Client) -> int:
     return EXIT_OK if data.get("ok") else EXIT_FAILED
 
 
+def _local_lines(st: dict) -> list[tuple[bool, str]]:
+    """Local mode health, as (ok, line) pairs for `status` and `doctor`."""
+    prof = ", ".join(f"{p['alias'] or p['context']}{' (default)' if p['default'] else ''}: "
+                     f"{'connected' if p['connected'] else 'not connected'}" for p in st.get("profiles") or [])
+    return [(bool(st.get("opencli")), f"opencli {st.get('opencli') or 'NOT FOUND'}"),
+            (bool(st.get("extension_connected")),
+             f"browser: OpenCLI extension {'connected' if st.get('extension_connected') else 'NOT CONNECTED'}"
+             f"{' (profile ' + st['profile'] + ')' if st.get('profile') else ''}; profiles: {prof or '-'}"
+             + (f" — {st['error']}" if st.get("error") else "")),
+            (bool(st.get("pdftotext")), f"pdftotext {'ok' if st.get('pdftotext') else 'MISSING (apt install poppler-utils)'}"),
+            (True, f"Semantic Scholar API key: {'set' if st.get('s2_api_key') else 'not set (shared anonymous limits)'}")]
+
+
 def cmd_engines(args, client: Client) -> int:
     data = client.get_json("/v2/engines")
     if args.json:
@@ -521,6 +551,13 @@ def cmd_doctor(args, client: Client) -> int:
     cfg = client.cfg
     checks: list[tuple[bool, str]] = []
     out(f"config file: {config.config_path()}")
+    if getattr(client, "local", False):
+        out(f"backend: local  [{cfg.sources.get('backend')}]; opencli: {cfg.opencli or '(from PATH)'}; "
+            f"profile: {cfg.profile or '(opencli default)'}")
+        checks = _local_lines(client.get_json("/v2/status"))
+        for ok, msg in checks:
+            out(f"{'✓' if ok else '✗'} {msg}")
+        return EXIT_OK if all(ok for ok, _ in checks[:3]) else EXIT_FAILED
     out(f"url: {cfg.url}  [{cfg.sources.get('url')}]")
     out(f"api key: {config.mask(cfg.api_key)}  [{cfg.sources.get('api_key')}]")
     out(f"admin key: {config.mask(cfg.admin_key)}  [{cfg.sources.get('admin_key')}]")
@@ -613,11 +650,11 @@ class _Parser(argparse.ArgumentParser):
         sys.exit(EXIT_USAGE)
 
 
-CONFIG_KEYS = ("url", "api-key", "admin-key", "vnc-url")
+CONFIG_KEYS = ("backend", "opencli", "profile", "s2-api-key", "url", "api-key", "admin-key", "vnc-url")
 SKILL_DIRS = {"claude": "~/.claude/skills/web-kit", "codex": "~/.codex/skills/web-kit"}
 
 POSITIONING = """\
-Fallback web access for agents, through a real, logged-in Chrome on a server.
+Fallback web access for agents, through the real, logged-in Chrome on this machine (opencli).
 Use it when the built-in web tools fail, are blocked or out of quota, or cannot do
 the job; when they work, prefer them.
 
@@ -657,8 +694,8 @@ Then `webkit read` the results you need.
 First line: '# engines <engine>=<ok:N|empty|error:CLASS|skipped> ...'.""")
     s.add_argument("query", nargs="+")
     s.add_argument("-p", "--profile", choices=PROFILES, default="general",
-                   help="engine chain: general=google>duckduckgo>bing, "
-                   "academic=semantic_scholar>google_scholar>openalex>arxiv, code=github>google, "
+                   help="engine chain: general=google>brave, "
+                   "academic=semantic_scholar>google_scholar>openalex>arxiv, "
                    "community=hackernews>stackoverflow (default: general)")
     s.add_argument("-e", "--engine", help="use exactly this engine (see `webkit engines`)")
     s.add_argument("-n", "--limit", type=int, default=10, help="max results (default 10)")
@@ -701,7 +738,7 @@ Default destination: {_tilde(config.download_dir())}/ ($WEBKIT_DOWNLOAD_DIR)."""
     d.add_argument("--max-mb", type=int, default=0, help="size limit in MB (default: backend limit)")
     d.add_argument("--allow-html", action="store_true", help="save a web page as-is instead of resolving its PDF")
     d.add_argument("--wait-human", action="store_true",
-                   help="only with a person at noVNC: open the page there and retry until they pass the check")
+                   help="only with a person at the browser: they pass the check in Chrome, webkit retries meanwhile")
     d.add_argument("--wait-timeout", type=int, default=300, help="seconds to wait with --wait-human (default 300)")
     d.set_defaults(func=cmd_download, default_budget=DEFAULT_BUDGET)
 
@@ -728,7 +765,8 @@ Bounded synchronous crawl of one site: one markdown file per page plus index.jso
     csub = cf.add_subparsers(dest="config_cmd", required=True, parser_class=_Parser)
     csub.add_parser("show", help="effective settings and where each comes from").set_defaults(func=cmd_config)
     csub.add_parser("path", help="config file location").set_defaults(func=cmd_config)
-    cs = csub.add_parser("set", help="set url / vnc-url (argument) or api-key / admin-key (stdin)")
+    cs = csub.add_parser("set", help="set backend / opencli / profile / url / vnc-url (argument), "
+                                     "or s2-api-key / api-key / admin-key (stdin)")
     cs.add_argument("key", choices=CONFIG_KEYS)
     cs.add_argument("value", nargs="?")
     cs.set_defaults(func=cmd_config)
@@ -750,7 +788,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     flags = {"url": getattr(args, "backend_url", None), "api_key": getattr(args, "key", None)}
-    client = Client(config.load(flags))
+    cfg = config.load(flags)
+    client = LocalClient(cfg) if cfg.backend == "local" else Client(cfg)
     OUT.configure(_budget(args), args.cmd)
     try:
         code = args.func(args, client)
