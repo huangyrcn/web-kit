@@ -47,6 +47,7 @@ parallel use raises CAPTCHA risk on your own accounts.
 ```bash
 uv tool install git+https://github.com/huangyrcn/web-kit     # update: uv tool upgrade web-kit
 npm install -g @jackwener/opencli    # then add the OpenCLI extension to Chrome (Chrome Web Store)
+opencli plugin install github:huangyrcn/web-kit   # web-kit's own adapters: biorxiv, medrxiv
 webkit config set profile main       # optional: the opencli profile alias (`opencli profile list`)
 webkit config set s2-api-key         # optional, from stdin: Semantic Scholar API key
 webkit doctor
@@ -79,6 +80,12 @@ most `--max-chars` characters in total, stdout and stderr together (default 4000
 path is printed; with `-o` only paths are printed; whatever else does not fit (long lists,
 many errors) goes to one file named in the last line; `--json` changes the format, never
 the amount.
+
+Who does what: **opencli** knows sites (one adapter per site: URL, page structure,
+fields); **webkit** knows agents (commands, engine chains, one result shape, error
+classes and exit codes, output budget, PDFs). A site opencli has no adapter for gets
+one in `opencli-plugin/` of this repo (a name official opencli does not use; dropped
+once upstream has one), and one line in webkit's engine table.
 
 Local-mode notes: keep Chrome open (exit 5 otherwise). Extensions that embed their
 own pages in sites (Immersive Translate, Zotero, Scholar PDF Reader) block browser

@@ -258,8 +258,9 @@ def test_status_reports_the_extension_for_the_configured_profile(opencli, monkey
     answers["--version"] = (0, "2.0.3\n", "")
     answers["profile list"] = (0, ok({"profiles": [{"alias": "main", "contextId": "c1", "connected": True,
                                                     "default": True}]}), "")
+    answers["plugin list"] = (0, ok([{"name": "webkit", "commands": ["rxiv"]}]), "")
     st = local.status(CFG)
-    assert st["opencli"] == "2.0.3" and st["extension_connected"] is True and st["error"] is None
+    assert st["opencli"] == "2.0.3" and st["extension_connected"] is True and st["error"] is None and st["plugin"]
     st = local.status(Config(profile="work"))
     assert st["extension_connected"] is False and "work" in st["error"]
 
@@ -308,3 +309,20 @@ def test_chinese_engines_report_their_security_checks(opencli):
     with pytest.raises(ApiError) as e:
         local.run_engine(CFG, "cnki", "图神经网络", 5)
     assert e.value.exit_code == 6
+
+
+def test_preprint_engines_come_from_the_webkit_plugin(opencli):
+    answers, calls = opencli
+    answers["biorxiv search"] = ok([{"rank": 1, "title": "Spatial deconvolution by Redeconve",
+                                     "authors": "Zixiang Zhou, Yunshan Zhong", "date": "2022-12-22",
+                                     "doi": "10.1101/2022.12.22.521551",
+                                     "url": "https://www.biorxiv.org/content/10.1101/2022.12.22.521551v1"}])
+    [r] = local.run_engine(CFG, "biorxiv", "spatial deconvolution", 5)
+    assert r["published"] == "2022-12-22" and r["extra"] == {"authors": ["Zixiang Zhou", "Yunshan Zhong"],
+                                                             "doi": "10.1101/2022.12.22.521551"}
+    assert calls[-1][:2] == ["biorxiv", "search"]
+    answers["medrxiv search"] = (2, json.dumps({"ok": False, "error": {"code": "unknown_command",
+                                                                       "message": "Unknown command: medrxiv"}}), "")
+    with pytest.raises(ApiError) as e:
+        local.run_engine(CFG, "medrxiv", "x", 5)
+    assert e.value.error == "engine_unavailable" and "opencli plugin install" in e.value.body["hint"]

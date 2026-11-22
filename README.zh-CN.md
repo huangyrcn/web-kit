@@ -34,6 +34,7 @@ AI Agent 上网的兜底通道：Agent 内置的网页工具失败、被拦、�
 ```bash
 uv tool install git+https://github.com/huangyrcn/web-kit     # 升级：uv tool upgrade web-kit
 npm install -g @jackwener/opencli    # 然后在 Chrome 里装 OpenCLI 插件（Chrome 应用商店）
+opencli plugin install github:huangyrcn/web-kit   # web-kit 自己的适配：biorxiv、medrxiv
 webkit config set profile main       # 可选：opencli 的 profile 别名（`opencli profile list`）
 webkit config set s2-api-key         # 可选，从标准输入读取：Semantic Scholar API key
 webkit doctor
@@ -57,6 +58,8 @@ webkit status                                  # 浏览器、出网、各引擎�
 退出码：0 成功 · 1 用法错误 · 2 无结果 · 3 失败（最多重试一次）· 4 认证 · 5 后端不可达 · 6 需要人工处理（验证码或登录，不要重试）· 7 忙（稍后重试）· 8 被封锁（网站拒绝这台服务器，不要重试，换来源）。错误以一行 JSON 输出到标准错误，其中的 `hint` 说明下一步怎么做。
 
 输出有总量预算，正文不会大量涌入 agent 的上下文：每条命令的标准输出和标准错误合计最多 `--max-chars` 个字符（默认 4000，上限 20000）。较长的页面保存到 `~/.cache/web-kit/pages/`，只打印预览和文件路径；用了 `-o` 就只打印路径；其余放不下的内容（长列表、大量错误）写入一个文件，最后一行给出路径；`--json` 只改变格式，不改变输出量。
+
+分工：**opencli** 负责"网站"（每个站点一个适配：网址、页面结构、字段）；**webkit** 负责"Agent"（命令、引擎顺序、统一的结果格式、错误分类和退出码、输出量控制、PDF）。opencli 没有适配的站点，在本仓库的 `opencli-plugin/` 里写一个（站点名不和官方重名；上游有了官方适配就删掉我们的），再在 webkit 的引擎表里加一行。
 
 本机模式说明：Chrome 要开着（否则退出码 5）。会往网页里嵌自己页面的扩展（沉浸式翻译、Zotero、Scholar PDF Reader）会让这些页面无法被自动化（错误 `browser_conflict`）。可用引擎见 `webkit engines`（本机模式没有时间过滤）。PDF 直接下载、不带浏览器 cookie，付费出版商的 PDF 会失败。`crawl` 和 `read -f html` 需要远端后端。
 

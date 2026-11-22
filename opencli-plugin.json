@@ -1,0 +1,10 @@
+{
+  "plugins": {
+    "webkit": {
+      "path": "opencli-plugin",
+      "version": "0.1.0",
+      "description": "web-kit's own opencli adapters, for sites opencli has none for (bioRxiv, medRxiv)",
+      "opencli": ">=2.0.0"
+    }
+  }
+}

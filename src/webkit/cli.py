@@ -529,7 +529,9 @@ def _local_lines(st: dict) -> list[tuple[bool, str]]:
              f"{' (profile ' + st['profile'] + ')' if st.get('profile') else ''}; profiles: {prof or '-'}"
              + (f" — {st['error']}" if st.get("error") else "")),
             (bool(st.get("pdftotext")), f"pdftotext {'ok' if st.get('pdftotext') else 'MISSING (apt install poppler-utils)'}"),
-            (True, f"Semantic Scholar API key: {'set' if st.get('s2_api_key') else 'not set (shared anonymous limits)'}")]
+            (True, f"Semantic Scholar API key: {'set' if st.get('s2_api_key') else 'not set (shared anonymous limits)'}"),
+            (True, "web-kit opencli plugin (biorxiv, medrxiv): " + ("installed" if st.get("plugin")
+                   else "NOT INSTALLED — opencli plugin install github:huangyrcn/web-kit"))]
 
 
 def cmd_engines(args, client: Client) -> int:

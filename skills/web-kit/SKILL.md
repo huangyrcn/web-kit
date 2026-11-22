@@ -71,7 +71,7 @@ grep -n -i -m 10 "ablation" paper.md | cut -c1-200                  # locate, th
 webkit read --pdf -o paper.md 10.1145/3774904.3792101                # DOI -> paper page -> its PDF, as text
 webkit read arXiv:2403.01092                                         # the abstract page
 webkit download arXiv:2403.01092                                     # the PDF file
-webkit search -e dblp "graph transformers"                          # also: pubmed, hackernews, stackoverflow
+webkit search -e dblp "graph transformers"                          # also: pubmed, biorxiv, medrxiv, ...
 webkit status                                                        # is the local Chrome connected
 ```
 

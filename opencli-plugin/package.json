@@ -1,0 +1,7 @@
+{
+  "name": "opencli-plugin-webkit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "web-kit's own opencli adapters, for sites opencli has none for (bioRxiv, medRxiv)"
+}

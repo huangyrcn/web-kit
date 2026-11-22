@@ -30,7 +30,7 @@ from .client import ApiError
 
 OPENCLI_TIMEOUT = 120
 # Warm tabs opencli keeps per site and reuses, instead of a tab (and window) per call.
-SITE_SLOTS = "web:2,google:1,google-scholar:1,brave:1,dblp:1"
+SITE_SLOTS = "web:2,google:1,google-scholar:1,brave:1,dblp:1,biorxiv:1,medrxiv:1"
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/158.0.0.0 Safari/537.36"
 PDF_MAX_BYTES = 60 * 1024 * 1024
 WALL_TEXT_LIMIT = 4000  # longer pages are content, whatever words they contain
@@ -46,6 +46,9 @@ BLOCK_MARKERS = ("you have been blocked", "error 1020", "error 1005", "error 100
                  "the owner of this website has banned", "you don't have permission to access",
                  "the url you requested has been blocked")
 INTERFERING = "another Chrome extension (Immersive Translate, Zotero, Scholar PDF Reader, ...)"
+# web-kit's own opencli adapters (opencli-plugin/ in this repo) for sites opencli has none for.
+PLUGIN_SITES = ("biorxiv", "medrxiv")
+PLUGIN_INSTALL = "opencli plugin install github:huangyrcn/web-kit"
 
 
 def err(error: str, message: str, hint: str = "", **extra) -> ApiError:
@@ -103,6 +106,8 @@ def _opencli_error(what: str, code: int, env: dict | None) -> ApiError | None:
     msg = f"{what}: {emsg or f'opencli exit {code}'}"
     if ecode in ("EMPTY_RESULT", "NOT_FOUND") or code == 66:
         return None
+    if ecode == "unknown_command":
+        return err("engine_unavailable", msg, hint=f"this engine comes from web-kit's opencli plugin: {PLUGIN_INSTALL}")
     if code == 69 or ecode in ("BROWSER_CONNECT", "ADAPTER_LOAD"):
         return err("unreachable", msg, hint="open Chrome (the profile with the OpenCLI extension) on this machine; "
                                             "`webkit doctor` shows the connection")
@@ -226,6 +231,10 @@ def _paper(venue_key: str, year_key: str = "year"):
     return make
 
 
+def _rxiv(r):
+    return _result(r["title"], r["url"], "", r.get("date"), authors=_authors(r.get("authors")), doi=r.get("doi"))
+
+
 def _hn(r):
     return _result(r["title"], r["url"], "", score=r.get("score"), comments=r.get("comments"), author=r.get("author"))
 
@@ -258,6 +267,9 @@ ENGINES: dict[str, Engine] = {
                    "https://oversea.cnki.net/kns/search?dbcode=CFLS&kw={q}&korder=SU"),
     "wanfang": Engine("wanfang search", 20, _paper("source"), "https://s.wanfangdata.com.cn/paper?q={q}"),
     "baidu_scholar": Engine("baidu-scholar search", 20, _paper("journal"), "https://xueshu.baidu.com/s?wd={q}"),
+    # Preprints: adapters from web-kit's own opencli plugin (opencli-plugin/ in this repo).
+    "biorxiv": Engine("biorxiv search", 75, _rxiv, "https://www.biorxiv.org/search/{q}"),
+    "medrxiv": Engine("medrxiv search", 75, _rxiv, "https://www.medrxiv.org/search/{q}"),
     "hackernews": Engine("hackernews search", 50, _hn),
     "stackoverflow": Engine("stackoverflow search", 50, _so),
 }
@@ -572,6 +584,11 @@ def status(cfg) -> dict:
     except ApiError as e:
         out["error"] = e.message
         return out
+    try:
+        plugins = (envelope(_run_opencli(cfg, ["plugin", "list"], 30, profile=False)[1]) or {}).get("data") or []
+        out["plugin"] = any(set(p.get("commands") or []) & {"rxiv"} or p.get("name") == "webkit" for p in plugins)
+    except ApiError:
+        out["plugin"] = False
     profiles = ((env.get("data") or {}).get("profiles")) or []
     out["profiles"] = [{"alias": p.get("alias"), "context": p.get("contextId"), "connected": bool(p.get("connected")),
                         "default": bool(p.get("default"))} for p in profiles]

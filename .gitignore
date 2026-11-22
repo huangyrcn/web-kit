@@ -33,3 +33,7 @@ backend/docker-compose.override.yml
 
 # Test caches
 .pytest_cache/
+
+# opencli links itself into an installed plugin directory (local path); generated lockfile
+opencli-plugin/node_modules/
+opencli-plugin/package-lock.json
