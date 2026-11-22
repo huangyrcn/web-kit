@@ -121,7 +121,7 @@ def test_pdf_to_text():
 def fake_engines(monkeypatch):
     behaviour: dict = {}
 
-    async def fake_call(name, q, limit, time_range, lang):
+    async def fake_call(name, q, limit, time_range, lang, **kw):
         b = behaviour.get(name, [])
         if isinstance(b, Exception):
             raise b
@@ -381,3 +381,486 @@ def test_read_pdf_without_a_pdf_link_is_not_found(monkeypatch):
     monkeypatch.setattr(page, "find_pdf_url", no)
     r = client.post("/v2/page", json={"url": "https://blog.example/post", "pdf": True})
     assert r.status_code == 404 and r.json()["error"] == "not_found"
+
+
+# ─── Semantic Scholar: Graph API first, website second ────────────────────────
+
+S2_API_BODY = {"total": 3, "offset": 0, "data": [
+    {"paperId": "62ed", "url": "https://www.semanticscholar.org/paper/62ed",
+     "title": "How Powerful are Graph Neural Networks?", "abstract": "Long abstract.",
+     "tldr": {"model": "tldr@v2.0.0", "text": "GNNs are  as powerful as WL."},
+     "venue": "ICLR", "year": 2018, "publicationDate": "2018-10-01", "citationCount": 10956,
+     "authors": [{"authorId": "1", "name": "Keyulu Xu"}, {"authorId": "2", "name": "Weihua Hu"}],
+     "openAccessPdf": {"url": "http://arxiv.org/pdf/1810.00826", "status": "GREEN"},
+     "fieldsOfStudy": ["Computer Science", "Mathematics"],
+     "externalIds": {"ArXiv": "1810.00826", "DOI": "10.48550/arXiv.1810.00826"}},
+    {"paperId": "aa", "url": "https://www.semanticscholar.org/paper/aa", "title": "No TLDR",
+     "abstract": "Abstract only.", "tldr": None, "year": 2020, "publicationDate": None,
+     "citationCount": 0, "authors": [], "openAccessPdf": None, "fieldsOfStudy": None, "externalIds": None},
+    {"paperId": "bb", "url": "https://www.semanticscholar.org/paper/bb", "title": ""},
+]}
+
+
+def test_s2_api_body_maps_to_the_website_result_shape():
+    from webkit_api import s2api
+    first, second = s2api.parse(S2_API_BODY, 10)
+    assert first["title"] == "How Powerful are Graph Neural Networks?"
+    assert first["snippet"] == "GNNs are as powerful as WL." and first["published"] == "2018-10-01"
+    assert first["extra"] == {"authors": ["Keyulu Xu", "Weihua Hu"], "venue": "ICLR",
+                              "fields": "Computer Science, Mathematics", "citations": "10956",
+                              "pdf": "http://arxiv.org/pdf/1810.00826",
+                              "doi": "10.48550/arXiv.1810.00826", "arxiv": "1810.00826"}
+    assert second["snippet"] == "Abstract only." and second["published"] == "2020"
+    assert second["extra"] == {"citations": "0"}
+    assert len(s2api.parse(S2_API_BODY, 1)) == 1
+
+
+def test_s2_error_page_is_blocked_only_for_403():
+    url = "https://www.semanticscholar.org/search?q=x"
+    err = serp.s2_error_page(url, "Our servers are having a bit of trouble.\nError: 403\nGo back")
+    assert err.error == "blocked" and "Do not retry" in err.hint
+    assert serp.s2_error_page(url, "Error: 500").error == "upstream_http"
+    assert serp.s2_error_page(url, "something went wrong").error == "upstream_http"
+
+
+@pytest.fixture
+def s2_paths(monkeypatch):
+    from webkit_api import s2api
+    calls: list[str] = []
+    behaviour = {"api": [{"title": "from api"}], "web": [{"title": "from web"}]}
+
+    async def fake(path, q, limit):
+        calls.append(path)
+        if isinstance(behaviour[path], Exception):
+            raise behaviour[path]
+        return behaviour[path]
+
+    monkeypatch.setattr(s2api, "search", lambda q, limit: fake("api", q, limit))
+    monkeypatch.setattr(serp, "_s2_website", lambda q, limit: fake("web", q, limit))
+    monkeypatch.setattr(serp.settings, "S2_API_KEY", "k")
+    return calls, behaviour
+
+
+def test_s2_uses_the_api_and_never_the_website_when_the_api_answers(s2_paths):
+    calls, _ = s2_paths
+    assert asyncio.run(serp.semantic_scholar("gnn", 5)) == [{"title": "from api"}]
+    assert calls == ["api"]
+
+
+def test_s2_api_empty_answer_is_final(s2_paths):
+    calls, behaviour = s2_paths
+    behaviour["api"] = []
+    assert asyncio.run(serp.semantic_scholar("gnn", 5)) == [] and calls == ["api"]
+
+
+def test_s2_falls_back_to_the_website_on_api_failure(s2_paths):
+    calls, behaviour = s2_paths
+    behaviour["api"] = errors.WebkitError("upstream_http", "semantic_scholar API returned HTTP 500")
+    assert asyncio.run(serp.semantic_scholar("gnn", 5)) == [{"title": "from web"}]
+    assert calls == ["api", "web"]
+
+
+def test_s2_reports_both_paths_when_both_fail(s2_paths):
+    _, behaviour = s2_paths
+    behaviour["api"] = errors.WebkitError("timeout", "semantic_scholar API did not answer")
+    behaviour["web"] = errors.blocked("https://www.semanticscholar.org/search?q=gnn", "error page (HTTP 403)")
+    with pytest.raises(errors.WebkitError) as e:
+        asyncio.run(serp.semantic_scholar("gnn", 5))
+    assert e.value.error == "blocked" and "API path: timeout" in e.value.message
+
+
+def test_s2_without_a_key_uses_the_website_only(s2_paths, monkeypatch):
+    calls, _ = s2_paths
+    monkeypatch.setattr(serp.settings, "S2_API_KEY", "")
+    assert asyncio.run(serp.semantic_scholar("gnn", 5)) == [{"title": "from web"}] and calls == ["web"]
+
+
+@pytest.fixture
+def s2_http(monkeypatch):
+    """s2api over a fake transport; answers are popped from `replies` in order."""
+    import httpx
+    from webkit_api import s2api
+    replies: list[tuple[int, dict]] = []
+    seen: list[httpx.Request] = []
+
+    def handler(request):
+        seen.append(request)
+        status, body = replies.pop(0)
+        return httpx.Response(status, json=body)
+
+    monkeypatch.setattr(s2api.settings, "S2_API_INTERVAL_MS", 50)
+    monkeypatch.setattr(s2api, "_last_end", 0.0)
+    monkeypatch.setattr(s2api, "_pace_lock", asyncio.Lock())
+    monkeypatch.setattr(s2api, "_client", httpx.AsyncClient(
+        base_url="https://api.test/graph/v1", headers={"x-api-key": "k"}, transport=httpx.MockTransport(handler)))
+    return replies, seen
+
+
+def test_s2_api_sends_the_key_and_paces_calls(s2_http):
+    import time
+    from webkit_api import s2api
+    replies, seen = s2_http
+    replies += [(200, S2_API_BODY)] * 3
+
+    async def three_at_once():
+        t0 = time.monotonic()
+        await asyncio.gather(*(s2api.search("gnn", 2) for _ in range(3)))
+        return time.monotonic() - t0
+
+    assert asyncio.run(three_at_once()) >= 0.1  # concurrent callers still go one by one, 50 ms apart
+    assert all(r.headers["x-api-key"] == "k" for r in seen)
+    assert seen[0].url.params["query"] == "gnn" and "tldr" in seen[0].url.params["fields"]
+
+
+def test_s2_api_retries_429_then_gives_up(s2_http, monkeypatch):
+    from webkit_api import s2api
+    monkeypatch.setattr(s2api.settings, "S2_API_RETRIES", 3)
+    replies, seen = s2_http
+    replies += [(429, {}), (429, {}), (503, {}), (200, S2_API_BODY)]
+    assert len(asyncio.run(s2api.search("gnn", 10))) == 2 and len(seen) == 4
+    replies += [(429, {})] * 4
+    with pytest.raises(errors.WebkitError) as e:
+        asyncio.run(s2api.search("gnn", 10))
+    assert e.value.error == "upstream_http" and "429" in e.value.message and len(seen) == 8
+
+
+def test_s2_api_rejected_key_is_reported(s2_http):
+    from webkit_api import s2api
+    replies, _ = s2_http
+    replies.append((403, {"message": "Forbidden"}))
+    with pytest.raises(errors.WebkitError) as e:
+        asyncio.run(s2api.search("gnn", 10))
+    assert "rejected the key" in e.value.message
+
+
+# ─── named browser targets (webkit-executor + opencli on another machine) ─────
+
+@pytest.fixture
+def lab(monkeypatch):
+    """One target 'lab' served by a fake executor; `answers[path]` is (status, body) or a list."""
+    import httpx
+    from webkit_api import settings, targets
+    answers: dict = {}
+    seen: list = []
+
+    def handler(request):
+        import json as _json
+        seen.append((request.url.path, _json.loads(request.content or b"{}"), request.headers.get("x-executor-key")))
+        a = answers[request.url.path]
+        status, body = a.pop(0) if isinstance(a, list) else a
+        if isinstance(body, Exception):
+            raise body
+        return httpx.Response(status, json=body)
+
+    monkeypatch.setattr(settings, "TARGETS", {"lab": "http://lab.test"})
+    monkeypatch.setattr(settings, "TARGET_KEYS", {"lab": "secret"})
+    monkeypatch.setattr(settings, "DEFAULT_VIA", "hnas")
+    targets._health.clear()
+    monkeypatch.setattr(targets, "_clients", {"lab": httpx.AsyncClient(
+        base_url="http://lab.test", headers={"X-Executor-Key": "secret"}, transport=httpx.MockTransport(handler))})
+    stats._engines.clear()
+    return answers, seen
+
+
+def _env(data=None, error=None, exit=0):
+    return (200, {"exit": exit, "envelope": {"ok": True, "data": data} if error is None
+                  else {"ok": False, "error": error}, "stderr": ""})
+
+
+def test_opencli_failures_map_to_webkit_classes():
+    from webkit_api import targets
+    def cls(exit_code, code):
+        err = targets._opencli_error("lab", "x", exit_code, {"ok": False, "error": {"code": code, "message": "m"}})
+        return err.error if err else None
+    assert cls(66, "EMPTY_RESULT") is None and cls(1, "NOT_FOUND") is None
+    assert cls(69, "BROWSER_CONNECT") == "browser_unavailable"
+    assert cls(75, "SESSION_BUSY") == "timeout"  # never "busy": that would abort a whole search chain
+    assert cls(77, "AUTH_REQUIRED") == "human_required"
+    assert cls(1, "COMMAND_EXEC") == "upstream_http"
+
+
+def test_target_run_sends_the_key_and_returns_rows(lab):
+    from webkit_api import targets
+    answers, seen = lab
+    answers["/run"] = _env([{"title": "t", "url": "https://x.org"}])
+    rows = asyncio.run(targets.run("lab", "main", "google search", "gnn", 5, {"lang": "en"}))
+    assert rows == [{"title": "t", "url": "https://x.org"}]
+    assert seen[0] == ("/run", {"command": "google search", "query": "gnn", "limit": 5, "options": {"lang": "en"},
+                                "profile": "main"}, "secret")
+
+
+def test_target_unreachable_or_disconnected_marks_it_unavailable(lab):
+    import httpx
+    from webkit_api import targets
+    answers, _ = lab
+    answers["/run"] = (200, httpx.ConnectError("refused"))
+    with pytest.raises(errors.WebkitError) as e:
+        asyncio.run(targets.run("lab", None, "google search", "q", 5))
+    assert e.value.error == "browser_unavailable" and not targets.available("lab")
+    targets._health.clear()
+    answers["/run"] = _env(error={"code": "BROWSER_CONNECT", "message": "extension not connected"}, exit=69)
+    with pytest.raises(errors.WebkitError) as e:
+        asyncio.run(targets.run("lab", None, "google search", "q", 5))
+    assert e.value.error == "browser_unavailable" and not targets.available("lab")
+
+
+def test_target_key_rejected_and_busy(lab):
+    from webkit_api import targets
+    answers, _ = lab
+    answers["/run"] = [(401, {"error": "unauthorized", "message": "x"}), (503, {"error": "busy", "message": "full"})]
+    with pytest.raises(errors.WebkitError) as e:
+        asyncio.run(targets.run("lab", None, "google search", "q", 5))
+    assert e.value.error == "internal" and "key" in e.value.message
+    with pytest.raises(errors.WebkitError) as e:
+        asyncio.run(targets.run("lab", None, "google search", "q", 5))
+    assert e.value.error == "timeout"
+
+
+def test_via_chain_is_parsed_in_order():
+    from webkit_api import settings, targets
+    old = settings.TARGETS
+    try:
+        settings.TARGETS = {"lab": "http://x", "mac": "http://y"}
+        assert targets.plan("local,hnas", "lab") == [("lab", None), ("hnas", None)]
+        assert targets.plan("lab/main, hnas, lab/main", None) == [("lab", "main"), ("hnas", None)]
+        assert targets.plan("local,hnas", "pc") == [("hnas", None)]  # no target for this machine
+        assert targets.plan(None, None) == [(settings.DEFAULT_VIA, None)]
+        for bad in ("nowhere", "local"):
+            with pytest.raises(errors.WebkitError) as e:
+                targets.plan(bad, "pc")
+            assert e.value.error == "invalid_request"
+    finally:
+        settings.TARGETS = old
+
+
+def test_opencli_rows_map_onto_the_result_shape():
+    google = serp.map_google_rows([{"type": "paa", "title": "Q?", "url": "https://q"},
+                                   {"type": "result", "title": "A", "url": "https://a", "snippet": "s"},
+                                   {"type": "result", "title": "A again", "url": "https://a"}], 10)
+    assert google == [{"title": "A", "url": "https://a", "snippet": "s"}]
+    scholar = serp.map_scholar_rows([{"title": "GNN", "url": "https://n.org/x", "authors": "G Corso, H Stark…",
+                                      "source": "Nature Reviews …", "year": "2024", "cited": "788"}], 10)
+    assert scholar == [{"title": "GNN", "url": "https://n.org/x", "snippet": "", "published": "2024",
+                        "extra": {"byline": "G Corso, H Stark… - Nature Reviews …", "citations": "788"}}]
+    ddg = serp.map_duckduckgo_rows([{"title": "T", "url": "https://t", "snippet": "s", "resultType": "web"},
+                                    {"title": "V", "url": "https://v", "resultType": "video"}], 10)
+    assert [r["url"] for r in ddg] == ["https://t"]
+
+
+def test_target_empty_answer_is_checked_against_the_live_page(lab):
+    answers, seen = lab
+    answers["/run"] = _env(error={"code": "EMPTY_RESULT", "message": "no results"}, exit=66)
+    answers["/page"] = (200, {"ok": True, "html": "<html>sorry</html>", "title": "",
+                              "final_url": "https://www.google.com/sorry/index", "text": "unusual traffic"})
+    with pytest.raises(errors.WebkitError) as e:
+        asyncio.run(serp.via_target("google_scholar", "lab", None, "gnn", 5))
+    assert e.value.error == "captcha" and seen[-1][0] == "/page"
+    answers["/page"] = (200, {"ok": True, "html": "<html>nothing</html>", "title": "Google Scholar",
+                              "final_url": "https://scholar.google.com/scholar?q=x", "text": "did not match any articles"})
+    assert asyncio.run(serp.via_target("google_scholar", "lab", None, "gnn", 5)) == []
+
+
+S2_ROWS_HTML = """<html><body>
+<div class="cl-paper-row serp-papers__paper-row">
+  <a href="/paper/How-Powerful-GNN/62ed"><h2 class="cl-paper-title">How Powerful are GNNs?</h2></a>
+  <span class="cl-paper-authors__author-box">Keyulu Xu</span><span class="cl-paper-authors__author-box">W. Hu</span>
+  <span class="cl-paper-venue">ICLR</span><span class="cl-paper-pubdates">1 October 2018</span>
+  <div class="tldr-abstract-replacement">TLDR This work characterizes GNNs. Expand</div>
+  <a class="cl-paper-stats__citation-pdp-link" href="/paper/x#citing-papers">10,956 Citations</a>
+  <a class="cl-paper-view-paper" href="https://arxiv.org/pdf/1810.00826">PDF</a>
+</div></body></html>"""
+
+
+def test_s2_website_html_from_a_target_is_parsed_like_the_live_page():
+    [r] = serp.parse_s2_html(S2_ROWS_HTML, "https://www.semanticscholar.org/search?q=gnn", 10)
+    assert r["title"] == "How Powerful are GNNs?" and r["url"] == "https://www.semanticscholar.org/paper/How-Powerful-GNN/62ed"
+    assert r["snippet"] == "This work characterizes GNNs." and r["published"] == "1 October 2018"
+    assert r["extra"] == {"authors": ["Keyulu Xu", "W. Hu"], "venue": "ICLR", "citations": "10956",
+                          "pdf": "https://arxiv.org/pdf/1810.00826"}
+    err_page = '<div data-test-id="error-message-block"><h1>Our servers are having a bit of trouble.</h1>Error: 403</div>'
+    with pytest.raises(errors.WebkitError) as e:
+        serp.parse_s2_html(err_page, "https://www.semanticscholar.org/search?q=gnn", 10)
+    assert e.value.error == "blocked"
+    with pytest.raises(errors.WebkitError) as e:
+        serp.parse_s2_html("<html><body>loading</body></html>", "https://s2/search", 10)
+    assert e.value.error == "unexpected_page"
+
+
+@pytest.fixture
+def routed(monkeypatch, lab):
+    """Search routing with fake HNAS engines and a fake target path."""
+    behaviour = {"hnas": {}, "lab": {}}
+    calls: list = []
+
+    async def fake_call(name, q, limit, time_range, lang, **kw):
+        calls.append((name, "hnas", kw.get("skip_s2_api", False)) if kw.get("skip_s2_api") else (name, "hnas"))
+        b = behaviour["hnas"].get(name, [])
+        if isinstance(b, Exception):
+            raise b
+        return [dict(r) for r in b]
+
+    async def fake_target(name, target, profile, q, limit, time_range, lang, api_first):
+        calls.append((name, target, profile, api_first))
+        b = behaviour["lab"].get(name, [])
+        if isinstance(b, Exception):
+            raise b
+        return [dict(r) for r in b]
+
+    async def fake_time_support(name):
+        return []
+
+    monkeypatch.setattr(search, "_call", fake_call)
+    monkeypatch.setattr(search, "_call_target", fake_target)
+    monkeypatch.setattr(search, "time_support", fake_time_support)
+    return behaviour, calls
+
+
+def test_chain_moves_on_when_a_browser_fails(routed):
+    behaviour, calls = routed
+    behaviour["hnas"]["google_scholar"] = errors.WebkitError("captcha", "unusual traffic")
+    behaviour["lab"]["google_scholar"] = [{"title": "T", "url": "https://t"}]
+    body = client.get("/v2/search", params={"q": "gnn", "engine": "google_scholar", "via": "hnas,lab"}).json()
+    assert calls == [("google_scholar", "hnas"), ("google_scholar", "lab", None, True)]
+    assert [(e["via"], e["status"]) for e in body["engines"]] == [("hnas", "error"), ("lab", "ok")]
+    assert body["results"][0]["via"] == "lab" and body["fallback_used"] is True
+    assert stats.snapshot()["google_scholar@lab"]["calls"] == 1
+
+
+def test_chain_without_a_next_browser_reports_the_failure(routed):
+    behaviour, calls = routed
+    behaviour["hnas"]["google_scholar"] = errors.WebkitError("captcha", "x")
+    r = client.get("/v2/search", params={"q": "x", "engine": "google_scholar", "via": "hnas"})
+    assert r.status_code == 502 and calls == [("google_scholar", "hnas")]
+    assert client.get("/v2/search", params={"q": "x", "via": "nowhere"}).status_code == 400
+
+
+def test_a_target_runs_browser_engines_and_api_engines_stay_here(routed):
+    behaviour, calls = routed
+    behaviour["lab"]["semantic_scholar"] = errors.WebkitError("blocked", "403")
+    behaviour["lab"]["google_scholar"] = []
+    behaviour["hnas"]["openalex"] = [{"title": "O", "url": "https://o"}]
+    body = client.get("/v2/search", params={"q": "x", "profile": "academic", "via": "lab/main"}).json()
+    assert calls == [("semantic_scholar", "lab", "main", True), ("google_scholar", "lab", "main", True),
+                     ("openalex", "hnas")]
+    assert [e.get("via") for e in body["engines"]] == ["lab", "lab", "hnas", None]
+
+
+def test_an_unavailable_target_is_reported_not_called(routed):
+    from webkit_api import targets
+    behaviour, calls = routed
+    targets._mark("lab", False, "down")
+    behaviour["hnas"]["google_scholar"] = errors.WebkitError("captcha", "x")
+    r = client.get("/v2/search", params={"q": "x", "engine": "google_scholar", "via": "hnas,lab"})
+    assert r.status_code == 502 and calls == [("google_scholar", "hnas")]
+    assert [e["error"] for e in r.json()["engines"]] == ["captcha", "browser_unavailable"]
+
+
+def test_local_runs_on_the_callers_own_machine_then_the_next_browser(routed):
+    behaviour, calls = routed
+    behaviour["lab"]["google_scholar"] = errors.WebkitError("captcha", "x")
+    behaviour["hnas"]["google_scholar"] = [{"title": "H", "url": "https://h"}]
+    body = client.get("/v2/search", params={"q": "x", "engine": "google_scholar", "via": "local,hnas"},
+                      headers={"X-Webkit-Client": "LAB.tailnet"}).json()
+    assert calls == [("google_scholar", "lab", None, True), ("google_scholar", "hnas")]
+    assert [(e["via"], e["status"]) for e in body["engines"]] == [("lab", "error"), ("hnas", "ok")]
+
+
+def test_s2_asks_the_api_once_per_search(routed):
+    behaviour, calls = routed
+    behaviour["lab"]["semantic_scholar"] = errors.WebkitError("upstream_http", "API 429; website 500")
+    behaviour["hnas"]["semantic_scholar"] = [{"title": "S", "url": "https://s"}]
+    client.get("/v2/search", params={"q": "x", "engine": "semantic_scholar", "via": "local,hnas"},
+               headers={"X-Webkit-Client": "lab"})
+    assert calls == [("semantic_scholar", "lab", None, True), ("semantic_scholar", "hnas", True)]
+
+
+def test_local_on_a_machine_without_a_target(routed):
+    behaviour, calls = routed
+    behaviour["hnas"]["google_scholar"] = [{"title": "H", "url": "https://h"}]
+    r = client.get("/v2/search", params={"q": "x", "engine": "google_scholar", "via": "local,hnas"},
+                   headers={"X-Webkit-Client": "macbook"})
+    assert r.status_code == 200 and calls == [("google_scholar", "hnas")]
+    r = client.get("/v2/search", params={"q": "x", "engine": "google_scholar", "via": "local"},
+                   headers={"X-Webkit-Client": "macbook"})
+    assert r.status_code == 400  # an empty chain is an error, never a silent default
+
+
+def test_a_target_without_the_time_filter_is_skipped(routed):
+    behaviour, calls = routed
+
+    async def all_times(name):
+        return ["day", "week", "month", "year"]
+    search.time_support = all_times
+    behaviour["hnas"]["google"] = [{"title": "G", "url": "https://g"}]
+    body = client.get("/v2/search", params={"q": "x", "engine": "google", "via": "local,hnas", "time": "week"},
+                      headers={"X-Webkit-Client": "lab"}).json()
+    assert calls == [("google", "hnas")] and body["engines"][0]["status"] == "skipped"
+
+
+@pytest.fixture
+def pages(monkeypatch, lab):
+    from webkit_api import page
+    answers, seen = lab
+    rendered = {"html": "<html><head><title>H</title></head><body><p>hnas body</p></body></html>",
+                "title": "H", "final_url": "https://a.org/", "status": 200}
+    hnas = {"result": rendered}
+
+    async def fake_render(url, wait_for, scroll, timeout):
+        r = hnas["result"]
+        if isinstance(r, Exception):
+            raise r
+        return dict(r, final_url=url)
+
+    async def not_pdf(url):
+        return False
+
+    def fake_markdown(url, html, fit):
+        return ("md:" + html, html, None, {})
+
+    monkeypatch.setattr(page, "render", fake_render)
+    monkeypatch.setattr(page, "_is_pdf", not_pdf)
+    monkeypatch.setattr(page, "to_markdown", fake_markdown)
+    answers["/page"] = (200, {"ok": True, "html": "<html>lab body " + "x" * 300 + "</html>", "title": "L",
+                              "final_url": "https://a.org/", "text": "lab body " + "x" * 300})
+    return hnas, answers, seen
+
+
+def test_read_moves_to_the_next_browser_when_one_is_walled(pages):
+    hnas, _, seen = pages
+    hnas["result"] = errors.blocked("https://a.org/", "block page")
+    out = client.post("/v2/page", json={"url": "https://a.org/", "via": "hnas,lab"}).json()
+    assert out["via"] == "lab" and out["content"].startswith("md:<html>lab body")
+    assert out["attempts"] == [{"via": "hnas", "error": "blocked", "message": "block page"}]
+    assert seen[-1][1]["url"] == "https://a.org/" and seen[-1][1]["settle_ms"] == 2000
+
+
+def test_read_treats_an_http_error_as_a_failure_and_stops_at_success(pages):
+    hnas, _, seen = pages
+    hnas["result"] = dict(hnas["result"], status=403)
+    assert client.post("/v2/page", json={"url": "https://a.org/", "via": "hnas,lab"}).json()["via"] == "lab"
+    seen.clear()
+    hnas["result"] = dict(hnas["result"], status=200)
+    out = client.post("/v2/page", json={"url": "https://a.org/", "via": "hnas,lab"}).json()
+    assert "via" not in out and "attempts" not in out and seen == []
+
+
+def test_read_local_first_then_this_server(pages):
+    _, answers, seen = pages
+    out = client.post("/v2/page", json={"url": "https://a.org/", "via": "local,hnas"},
+                      headers={"X-Webkit-Client": "lab"}).json()
+    assert out["via"] == "lab" and seen[-1][0] == "/page"
+    answers["/page"] = (200, {"ok": False, "step": "open", "exit": 69,
+                              "envelope": {"ok": False, "error": {"code": "BROWSER_CONNECT", "message": "x"}}})
+    out = client.post("/v2/page", json={"url": "https://a.org/x", "via": "local,hnas"},
+                      headers={"X-Webkit-Client": "lab"}).json()
+    assert "via" not in out and out["attempts"][0]["error"] == "browser_unavailable"
+    from webkit_api import targets
+    assert targets.local_name("Lab.tail1234.ts.net") == "lab" and targets.local_name("mac") is None
+
+
+def test_read_on_a_target_still_refuses_wall_pages(pages):
+    _, answers, _ = pages
+    answers["/page"] = (200, {"ok": True, "html": "<html>Just a moment...</html>", "title": "Just a moment...",
+                              "final_url": "https://a.org/", "text": "Checking if the site connection is secure"})
+    r = client.post("/v2/page", json={"url": "https://a.org/", "via": "lab"})
+    assert r.status_code == 409 and r.json()["error"] == "human_required"

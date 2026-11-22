@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from . import __version__, browser, settings
+from . import __version__, browser, settings, targets
 from .download import router as download_router
 from .errors import WebkitError, classify, webkit_error_handler
 from .page import router as page_router
@@ -28,8 +28,11 @@ async def lifespan(_: FastAPI):
     except Exception as e:  # noqa: BLE001 - Chrome may still be starting
         logger.warning("initial CDP connect failed (retried on demand): %s", e)
     probe = asyncio.create_task(egress_loop())
+    target_probe = asyncio.create_task(targets.probe_loop()) if targets.names() else None
     yield
     probe.cancel()
+    if target_probe:
+        target_probe.cancel()
     await browser.shutdown()
 
 

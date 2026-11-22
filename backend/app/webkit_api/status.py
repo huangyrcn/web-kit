@@ -12,9 +12,9 @@ import ssl
 import time
 from importlib.metadata import PackageNotFoundError, version as pkg_version
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 
-from . import API_VERSION, __version__, browser, searxng, settings, stats
+from . import API_VERSION, __version__, browser, searxng, settings, stats, targets
 from .errors import WebkitError, classify
 
 logger = logging.getLogger("webkit.status")
@@ -86,7 +86,7 @@ async def version():
 
 
 @router.get("/v2/status")
-async def status():
+async def status(request: Request = None):
     sx_errors = await searxng.stats_errors()
     api_engines = {}
     for cli, sx in searxng.ENGINES.items():
@@ -106,6 +106,9 @@ async def status():
         "egress_down": down_hosts,
         "engines": stats.snapshot(),
         "searxng": {"healthy": await searxng.healthy(), "engine_errors": api_engines},
+        "targets": targets.snapshot(),  # optional browsers: never part of "ok"
+        "local_target": targets.local_name(request.headers.get("x-webkit-client") if request else None),
+        "default_via": settings.DEFAULT_VIA,
     }
 
 

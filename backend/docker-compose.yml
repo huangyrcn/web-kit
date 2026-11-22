@@ -29,6 +29,10 @@ services:
       WEBKIT_VNC_PASSWORD: ${WEBKIT_VNC_PASSWORD:-}
       SEARXNG_SECRET: ${SEARXNG_SECRET:?set SEARXNG_SECRET in .env}
       WEBKIT_MAX_PAGES: ${WEBKIT_MAX_PAGES:-5}
+      WEBKIT_S2_API_KEY: ${WEBKIT_S2_API_KEY:-}
+      WEBKIT_TARGETS: ${WEBKIT_TARGETS:-}
+      WEBKIT_TARGET_KEYS: ${WEBKIT_TARGET_KEYS:-}
+      WEBKIT_DEFAULT_VIA: ${WEBKIT_DEFAULT_VIA:-hnas}
       # Browser time zone. Match the egress IP's region: a UTC browser on a
       # California IP is an anti-bot signal.
       TZ: ${WEBKIT_TZ:-UTC}

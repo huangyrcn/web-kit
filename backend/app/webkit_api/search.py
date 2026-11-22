@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import time
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 
-from . import searxng, serp, stats
+from . import searxng, serp, stats, targets
 from .errors import WebkitError, classify
+from .targets import HNAS
 
 router = APIRouter()
 
@@ -42,10 +43,24 @@ async def time_support(engine: str) -> list[str]:
     return list(TIME_RANGES) if (await _searxng_time_support()).get(engine) else []
 
 
-async def _call(engine: str, q: str, limit: int, time_range: str | None, lang: str | None) -> list[dict]:
+async def _call(engine: str, q: str, limit: int, time_range: str | None, lang: str | None,
+                skip_s2_api: bool = False) -> list[dict]:
+    if engine == "semantic_scholar" and skip_s2_api:  # the API already failed on a target
+        return await serp._s2_website(q, limit)
     if engine in serp.ENGINES:
         return await serp.ENGINES[engine](q, limit, time_range, lang)
     return await searxng.search(engine, q, limit, time_range, lang)
+
+
+async def _call_target(engine: str, target: str, profile: str | None, q: str, limit: int,
+                       time_range: str | None, lang: str | None, api_first: bool) -> list[dict]:
+    return await serp.via_target(engine, target, profile, q, limit, time_range, lang, api_first)
+
+
+def _browsers(engine: str, chain: list[tuple[str, str | None]]) -> list[tuple[str, str | None]]:
+    """The --via chain for one engine. API engines (openalex, github, ...) use no browser
+    and always run on this server."""
+    return chain if engine in serp.TARGET_CAPABLE else [(HNAS, None)]
 
 
 @router.get("/v2/search")
@@ -56,9 +71,12 @@ async def search(
     limit: int = Query(10, ge=1, le=50),
     time: str | None = Query(None),
     lang: str | None = Query(None),
+    via: str | None = Query(None, description="browser chain, e.g. local,hnas (default WEBKIT_DEFAULT_VIA)"),
+    request: Request = None,
 ):
     if time is not None and time not in TIME_RANGES:
         raise WebkitError("invalid_request", f"time must be one of {', '.join(TIME_RANGES)}")
+    browsers = targets.plan(via, request.headers.get("x-webkit-client") if request else None)
     if engine:
         if engine not in ALL_ENGINES:
             raise WebkitError("invalid_request", f"unknown engine '{engine}'", hint="see `webkit engines`")
@@ -78,33 +96,55 @@ async def search(
         if results:
             report.append({"engine": name, "status": "skipped"})
             continue
-        if time and time not in await time_support(name):
-            report.append({"engine": name, "status": "skipped", "reason": f"no '{time}' time filter"})
-            continue
-        t0 = _now_ms()
-        try:
-            found = await _call(name, q, limit, time, lang)
-        except Exception as e:  # noqa: BLE001 - every failure becomes a reported outcome
-            err = classify(e)
-            if err.error == "busy":
-                raise err
-            stats.record(name, "error", err.error, err.message)
-            report.append({"engine": name, "status": "error", "error": err.error,
-                           "message": err.message, "ms": _now_ms() - t0})
-            continue
-        status = "ok" if found else "empty"
-        stats.record(name, status)
-        report.append({"engine": name, "status": status, "count": len(found), "ms": _now_ms() - t0})
-        for r in found:
-            r["engine"] = name
-        results = found
+        order = _browsers(name, browsers)
+        s2_api_tried = False  # the S2 Graph API runs once per search, in the first attempt
+        for k, (at, prof) in enumerate(order):
+            last = k == len(order) - 1
+            stat_name = name if at == HNAS else f"{name}@{at}"
+            if at != HNAS and not targets.available(at):
+                err = targets.unavailable_error(at)
+                report.append({"engine": name, "via": at, "status": "error", "error": err.error,
+                               "message": err.message, "ms": 0})
+                continue
+            supported = await time_support(name) if at == HNAS else serp.target_time_support(name)
+            if time and time not in supported:
+                report.append({"engine": name, "via": at, "status": "skipped",
+                               "reason": f"no '{time}' time filter" + ("" if at == HNAS else f" on target {at}")})
+                continue
+            t0 = _now_ms()
+            try:
+                if at == HNAS:
+                    found = await _call(name, q, limit, time, lang, skip_s2_api=s2_api_tried)
+                else:
+                    found = await _call_target(name, at, prof, q, limit, time, lang, api_first=not s2_api_tried)
+            except Exception as e:  # noqa: BLE001 - every failure becomes a reported outcome
+                err = classify(e)
+                s2_api_tried = s2_api_tried or name == "semantic_scholar"
+                if err.error == "busy" and last:  # nothing left to try: keep the busy contract (exit 7)
+                    raise err
+                stats.record(stat_name, "error", err.error, err.message)
+                report.append({"engine": name, "via": at, "status": "error", "error": err.error,
+                               "message": err.message, "ms": _now_ms() - t0})
+                if err.error == "invalid_request":  # bad input: another browser would not help
+                    break
+                continue
+            status = "ok" if found else "empty"
+            stats.record(stat_name, status)
+            report.append({"engine": name, "via": at, "status": status, "count": len(found),
+                           "ms": _now_ms() - t0})
+            for r in found:
+                r["engine"] = name
+                if at != HNAS:
+                    r["via"] = at
+            results = found
+            break
 
     tried = [r for r in report if r["status"] != "skipped"]
     if not results and tried and all(r["status"] == "error" for r in tried):
         classes = sorted({r["error"] for r in tried})
         raise WebkitError(
             "engines_failed",
-            "every engine failed: " + "; ".join(f"{r['engine']}={r['error']}" for r in tried),
+            "every engine failed: " + "; ".join(f"{_label(r)}={r['error']}" for r in tried),
             hint=("the backend lost its route out; see `webkit status`" if set(classes) <= {"network", "timeout"}
                   else "anti-bot checks stopped every engine: use WebSearch or another profile; if the user is "
                        "present they can pass the check in the backend browser via noVNC"
@@ -138,8 +178,14 @@ async def engines():
             "kind": "crawler" if name in serp.ENGINES else "api",
             "time": await time_support(name),
             "profiles": membership.get(name, []),
+            "targets": name in serp.TARGET_CAPABLE,
         })
-    return {"profiles": PROFILES, "engines": out}
+    return {"profiles": PROFILES, "engines": out, "targets": targets.names()}
+
+
+def _label(entry: dict) -> str:
+    via = entry.get("via", HNAS)
+    return entry["engine"] if via == HNAS else f"{entry['engine']}@{via}"
 
 
 def _now_ms() -> int:

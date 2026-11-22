@@ -16,12 +16,13 @@ import time
 from typing import Literal
 from urllib.parse import urljoin, urlparse
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
-from . import browser, settings
+from . import browser, settings, targets
 from .download import fetch_bytes, wall_kind
 from .errors import WebkitError, blocked, classify, human_required
+from .targets import HNAS
 
 logger = logging.getLogger("webkit.page")
 router = APIRouter()
@@ -38,6 +39,7 @@ class PageRequest(BaseModel):
     pdf: bool = Field(False, description="read the paper PDF this page links (citation_pdf_url)")
     max_chars: int = Field(0, ge=0)
     timeout: int = Field(settings.PAGE_TIMEOUT, ge=5, le=300)
+    via: str | None = Field(None, description="browser chain, e.g. local,hnas (default WEBKIT_DEFAULT_VIA)")
 
 
 class CrawlRequest(BaseModel):
@@ -322,6 +324,67 @@ async def render(url: str, wait_for: str | None, scroll: bool, timeout: int) -> 
             await browser.safe_close(page)
 
 
+TARGET_SETTLE_MS = 2000  # a target's open returns at load; give late scripts a moment
+
+
+async def render_on_target(target: str, profile: str | None, req: "PageRequest") -> dict:
+    """Render req.url in a named target's Chrome; walls raise like render() does."""
+    selector = settle = None
+    if req.wait_for:
+        if req.wait_for.isdigit():
+            settle = int(req.wait_for)
+        else:
+            selector = req.wait_for.removeprefix("css:")
+    rendered = await targets.page(target, profile, req.url, wait_selector=selector,
+                                  settle_ms=settle if settle is not None else TARGET_SETTLE_MS,
+                                  wait_timeout_ms=req.timeout * 1000)
+    text = rendered["text"]
+    kind = page_wall_kind(rendered["title"], text, rendered["html"] if len(text.strip()) < 200 else "")
+    if kind == "blocked":
+        raise blocked(req.url, f"the site refuses the browser on target {target} (block page instead of content)")
+    if kind == "human":
+        raise human_required(req.url, f"the site shows a verification page in target {target}'s browser")
+    return rendered
+
+
+async def _read_html(req: "PageRequest", at: str, profile: str | None) -> dict:
+    """One browser's attempt at an HTML read (a PDF this server's browser stumbles on is
+    read as a PDF)."""
+    if at != HNAS:
+        return await _html_response(req, await render_on_target(at, profile, req))
+    try:
+        rendered = await render(req.url, req.wait_for, req.scroll, req.timeout)
+    except _IsPdf:
+        out = await _read_pdf(req)
+        if out is None:
+            raise WebkitError("internal", "server announced a PDF but did not deliver one") from None
+        return out
+    return await _html_response(req, rendered)
+
+
+async def _html_response(req: "PageRequest", rendered: dict) -> dict:
+    if rendered["status"] >= 400:
+        raise WebkitError("upstream_http", f"site returned HTTP {rendered['status']}", status_code=rendered["status"])
+    text, cleaned, links, meta = await asyncio.to_thread(
+        to_markdown, rendered["final_url"], rendered["html"], req.format == "fit")
+    out = {"url": req.url, "final_url": rendered["final_url"],
+           "title": rendered["title"] or meta.get("title") or "", "kind": "html", "format": req.format}
+    if rendered.get("via"):
+        out["via"] = rendered["via"]
+    if req.format == "links":
+        out["links"] = [{"href": l.href, "text": (l.text or "").strip(), "scope": scope}
+                        for scope in ("internal", "external")
+                        for l in getattr(links, scope, []) if l.href]
+    elif req.format == "html":
+        out["content"] = cleaned
+    elif req.format == "json":
+        out["content"] = text
+        out["metadata"] = {k: v for k, v in meta.items() if isinstance(v, (str, int, float))}
+    else:
+        out["content"] = text
+    return out
+
+
 def to_markdown(url: str, html: str, fit: bool):
     """(markdown, cleaned_html, links, metadata) using crawl4ai's scraper and generator."""
     from crawl4ai.content_filter_strategy import PruningContentFilter
@@ -350,9 +413,10 @@ def _finish(out: dict, max_chars: int) -> dict:
 
 
 @router.post("/v2/page")
-async def page(req: PageRequest):
+async def page(req: PageRequest, request: Request = None):
     _check_url(req.url)
-    key = (req.url, req.format, req.wait_for, req.scroll, req.pdf)
+    chain = targets.plan(req.via, request.headers.get("x-webkit-client") if request else None)
+    key = (req.url, req.format, req.wait_for, req.scroll, req.pdf, tuple(chain))
     if req.cache and key in _cache and _cache[key][0] > time.time():
         return _finish(dict(_cache[key][1]), req.max_chars)
 
@@ -369,32 +433,32 @@ async def page(req: PageRequest):
                               "try `webkit download URL`, or read the page itself")
     elif req.format != "html" and await _is_pdf(req.url):
         out = await _read_pdf(req)
-    if out is None:
+    # Browsers in --via order; the next one is tried when one fails.
+    attempts: list[dict] = []
+    last_err: WebkitError | None = None
+    for at, profile in ([] if out is not None else chain):
+        if at != HNAS and not targets.available(at):
+            last_err = targets.unavailable_error(at)
+            attempts.append({"via": at, "error": last_err.error, "message": last_err.message})
+            continue
         try:
-            rendered = await render(req.url, req.wait_for, req.scroll, req.timeout)
-        except _IsPdf:
-            out = await _read_pdf(req)
-            if out is None:
-                raise WebkitError("internal", "server announced a PDF but did not deliver one") from None
-        else:
-            if rendered["status"] >= 400:
-                raise WebkitError("upstream_http", f"site returned HTTP {rendered['status']}",
-                                  status_code=rendered["status"])
-            text, cleaned, links, meta = await asyncio.to_thread(
-                to_markdown, rendered["final_url"], rendered["html"], req.format == "fit")
-            out = {"url": req.url, "final_url": rendered["final_url"],
-                   "title": rendered["title"] or meta.get("title") or "", "kind": "html", "format": req.format}
-            if req.format == "links":
-                out["links"] = [{"href": l.href, "text": (l.text or "").strip(), "scope": scope}
-                                for scope in ("internal", "external")
-                                for l in getattr(links, scope, []) if l.href]
-            elif req.format == "html":
-                out["content"] = cleaned
-            elif req.format == "json":
-                out["content"] = text
-                out["metadata"] = {k: v for k, v in meta.items() if isinstance(v, (str, int, float))}
-            else:
-                out["content"] = text
+            out = await _read_html(req, at, profile)
+        except WebkitError as e:
+            if e.error == "invalid_request":  # bad input: another browser would not help
+                raise
+            last_err = e
+            attempts.append({"via": at, "error": e.error, "message": e.message})
+            logger.info("page %s: %s failed (%s)", req.url, at, e.error)
+            continue
+        if attempts:
+            out["attempts"] = attempts
+        break
+    if out is None:
+        if last_err is None:
+            raise WebkitError("internal", "no browser was tried")
+        if len(attempts) > 1:
+            last_err.extra["attempts"] = attempts
+        raise last_err
     if len(_cache) > 256:  # keep the in-process cache small
         for k in [k for k, (exp, _) in _cache.items() if exp < time.time()] or list(_cache)[:128]:
             _cache.pop(k, None)
