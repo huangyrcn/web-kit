@@ -130,8 +130,10 @@ def wall_kind(text: str) -> str | None:
     return None
 
 
-def _wall_error(url: str, what: str, text: str) -> ApiError | None:
-    kind = wall_kind(text) if len(text) < WALL_TEXT_LIMIT else None
+def _wall_error(url: str, what: str, text: str, limit: int | None = WALL_TEXT_LIMIT) -> ApiError | None:
+    """limit: pages longer than this count as content (None: always look, as for a search
+    page that answered nothing, where a check page is the likely reason)."""
+    kind = wall_kind(text) if limit is None or len(text) < limit else None
     if kind == "blocked":
         return err("blocked", f"{what}: the site refuses this browser (block page instead of content)", url=url,
                    hint="do not retry: use another source, or report the URL as not accessible")
@@ -314,8 +316,8 @@ def run_engine(cfg, name: str, q: str, limit: int, lang: str | None = None) -> l
         raise e
     if spec.search_url:  # a browser engine's "no results" may be a CAPTCHA page: look at it
         url = spec.search_url.format(q=quote_plus(q))
-        _, _, text = web_read(cfg, url)
-        wall = _wall_error(url, name, text)
+        title, _, text = web_read(cfg, url)
+        wall = _wall_error(url, name, title + "\n" + text, limit=None)
         if wall:
             raise wall
     return []

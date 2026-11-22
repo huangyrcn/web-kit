@@ -326,3 +326,18 @@ def test_preprint_engines_come_from_the_webkit_plugin(opencli):
     with pytest.raises(ApiError) as e:
         local.run_engine(CFG, "medrxiv", "x", 5)
     assert e.value.error == "engine_unavailable" and "opencli plugin install" in e.value.body["hint"]
+
+
+def test_an_empty_answer_is_checked_in_the_title_and_on_long_pages(opencli):
+    answers, _ = opencli
+    answers["baidu-scholar search"] = ok([])
+    answers["web read"] = (0, "# 百度安全验证\n> 原文链接: https://xueshu.baidu.com/s\n\n---\n", "")
+    with pytest.raises(ApiError) as e:
+        local.run_engine(CFG, "baidu_scholar", "图神经网络", 5)
+    assert e.value.exit_code == 6
+    answers["wanfang search"] = ok([])
+    body = "## 来自 iframe: https://www.wanfangdata.com.cn/verify?ip=x\n" + "导航 " * 3000
+    answers["web read"] = (0, WEB.format(url="https://s.wanfangdata.com.cn/paper", body=body), "")
+    with pytest.raises(ApiError) as e:
+        local.run_engine(CFG, "wanfang", "图神经网络", 5)
+    assert e.value.exit_code == 6
