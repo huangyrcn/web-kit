@@ -30,7 +30,8 @@ Use `webkit` only: never call `opencli` yourself.
 | The file itself (to keep, hand over, or process) | `webkit download TARGET` | the saved path; nothing printed from the content |
 
 TARGET is a URL, a DOI (`10.1145/...`, `doi:...`) or `arXiv:ID`. Don't know the URL: `search`.
-Want to know what it says: `read`. Need the file: `download`.
+Want to know what it says: `read`. Need the file: `download`. `webkit engines` lists every engine
+(`-e NAME`, e.g. dblp, pubmed, biorxiv, medrxiv, cnki) and profile (`-p general|academic|community`).
 
 ## When the built-in tools fail
 
@@ -78,15 +79,17 @@ webkit search -p academic "temporal knowledge graph forecasting LLM"
 webkit read https://example.org/post                                 # short page: printed; long: file + preview
 webkit read -o paper.md "https://openreview.net/pdf?id=FXdMgfCDer"   # a PDF comes back as text
 grep -n -i -m 10 "ablation" paper.md | cut -c1-200                  # locate, then read only those lines
-webkit read --pdf -o paper.md 10.1145/3774904.3792101                # DOI -> paper page -> its PDF, as text
+webkit read --pdf -o paper.md 10.48550/arXiv.2301.09633             # DOI -> its open-access PDF, as text
 webkit read arXiv:2403.01092                                         # the abstract page
 webkit download arXiv:2403.01092                                     # the PDF file
 webkit search -e dblp "graph transformers"                          # also: pubmed, biorxiv, medrxiv, ...
 webkit status                                                        # is the local Chrome connected
 ```
 
-Setup: `uv tool install git+https://github.com/huangyrcn/web-kit`, `npm install -g @jackwener/opencli`,
-the OpenCLI extension in Chrome, then `webkit doctor` and `webkit skill install [--agent codex]`.
+Setup: `npm install -g @jackwener/opencli` and the OpenCLI extension in Chrome;
+`opencli plugin install github:huangyrcn/web-kit` (biorxiv, medrxiv);
+`uv tool install git+https://github.com/huangyrcn/web-kit`; then `webkit doctor` and
+`webkit skill install [--agent codex]`.
 When anything fails, run `webkit doctor` first. Every option of every command:
 `reference.md` next to this file, or `webkit <command> --help`.
 """
