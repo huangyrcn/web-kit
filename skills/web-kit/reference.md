@@ -172,3 +172,33 @@ connection:
                      $WEBKIT_URL)
   --timeout TIMEOUT  seconds to wait for the answer
 ```
+
+## webkit stats
+
+```
+usage: webkit stats [-h] [--url URL] [--timeout TIMEOUT] [--json]
+                    [--max-chars N] [--days DAYS]
+                    [FILE ...]
+
+Summarize the events log: outcomes and latency per command and per engine, pages that
+failed (by domain), output budget use, repeated calls. Every search / read / download
+adds one JSON line to ~/.local/state/web-kit/events.jsonl (full query and URLs; never
+keys or page text); `webkit config set log off` stops it. FILE '-' reads stdin, e.g. a
+web-kit server's log:  ssh HOST docker logs web-kit 2>&1 | webkit stats -
+
+positional arguments:
+  FILE               event lines to read (default: the log above)
+
+options:
+  -h, --help         show this help message and exit
+  --json             JSON output (same amount, different format)
+  --max-chars N      most characters this command prints (default 4000, at
+                     most 20000); longer text goes to a file and its path is
+                     printed
+  --days DAYS        only the last N days (default 7; 0 = all)
+
+connection:
+  --url URL          web-kit server URL, remote mode (default: config /
+                     $WEBKIT_URL)
+  --timeout TIMEOUT  seconds to wait for the answer
+```

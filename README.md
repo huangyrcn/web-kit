@@ -64,6 +64,7 @@ webkit read https://example.org/post           # short page: printed; long: outl
 webkit download https://example.com/paper.pdf  # -> ~/.cache/web-kit/downloads/
 webkit download arXiv:2403.01092               # a paper page or DOI resolves to its PDF
 webkit status                                  # opencli, the Chrome extension, the plugin
+webkit stats                                   # what the last 7 days of calls did (events log)
 ```
 
 The first line of `search` output reports each engine:
@@ -92,6 +93,14 @@ automation on those pages (error `browser_conflict`). Engines: `webkit engines`
 (no time filters locally). PDFs are fetched without browser cookies, so paywalled
 publisher PDFs fail. `read -f html` is not available.
 
+Events log: every `search` / `read` / `download` appends one JSON line to
+`~/.local/state/web-kit/events.jsonl` (0600; rotated at 10 MB, 3 files kept): the full
+query or URLs, each engine's outcome and time, page sizes, error class, exit code, how
+much was printed, and which agent called (Claude Code or Codex, from its environment).
+Never keys, page text or result lists. `webkit stats` summarizes it: outcomes and
+latency per command and per engine, failing domains, output budget use, repeated calls.
+`webkit config set log off` stops it.
+
 ## Remote mode (the web-kit server)
 
 The server is local mode in a container: Chrome with the OpenCLI extension
@@ -113,6 +122,10 @@ address, `WEBKIT_BIND`); every route needs its key all the same. Clients:
 - `6080` noVNC for a person (user `webkit`, password = admin key): log in to sites
   once; the profile lives in the `chrome-data` volume. `download --wait-human` opens
   the page there.
+
+The server writes the same events, one JSON line per request, to stdout (with the
+caller's address; a healthy `/healthz` is not logged; `WEBKIT_LOG=off` stops it):
+`docker logs web-kit 2>&1 | webkit stats -`.
 
 Pinned: Chrome (`CHROME_VERSION`; a new Chrome voids the Cloudflare passes the profile
 holds), Node and opencli. The OpenCLI extension updates itself from the Web Store; if a

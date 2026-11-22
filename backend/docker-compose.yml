@@ -25,6 +25,7 @@ services:
       WEBKIT_ADMIN_KEY: ${WEBKIT_ADMIN_KEY:?set WEBKIT_ADMIN_KEY in .env}
       WEBKIT_S2_API_KEY: ${WEBKIT_S2_API_KEY:-}
       WEBKIT_MAX_INFLIGHT: ${WEBKIT_MAX_INFLIGHT:-4}
+      WEBKIT_LOG: ${WEBKIT_LOG:-on}
       # Browser time zone: match the egress IP's region (a UTC browser on a
       # California IP is an anti-bot signal).
       TZ: ${WEBKIT_TZ:-UTC}

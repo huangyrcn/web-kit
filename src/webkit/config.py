@@ -2,10 +2,11 @@
 
 Precedence: command-line flags > environment > config file > defaults.
   env:  WEBKIT_BACKEND, WEBKIT_OPENCLI, WEBKIT_PROFILE, WEBKIT_S2_API_KEY,
-        WEBKIT_URL, WEBKIT_API_KEY, WEBKIT_ADMIN_KEY, WEBKIT_VNC_URL, WEBKIT_DOWNLOAD_DIR, WEBKIT_CACHE_DIR
+        WEBKIT_URL, WEBKIT_API_KEY, WEBKIT_ADMIN_KEY, WEBKIT_VNC_URL, WEBKIT_LOG,
+        WEBKIT_DOWNLOAD_DIR, WEBKIT_CACHE_DIR, WEBKIT_STATE_DIR
         (Claude plugin userConfig arrives as CLAUDE_PLUGIN_OPTION_URL / _API_KEY / _ADMIN_KEY)
   file: ~/.config/web-kit/config.toml  (or $WEBKIT_CONFIG), keys: backend, opencli, profile, s2_api_key,
-        url, api_key, admin_key, vnc_url
+        url, api_key, admin_key, vnc_url, log
 
 backend = "local" (default) runs every command on this machine through opencli and this
 machine's Chrome (local.py); "remote" talks to a web-kit backend at `url` with `api_key`.
@@ -21,7 +22,7 @@ from urllib.parse import urlparse
 
 DEFAULT_URL = "http://localhost:8082"
 DEFAULT_BACKEND = "local"
-KEYS = ("backend", "opencli", "profile", "s2_api_key", "url", "api_key", "admin_key", "vnc_url")
+KEYS = ("backend", "opencli", "profile", "s2_api_key", "url", "api_key", "admin_key", "vnc_url", "log")
 _ENV = {
     "url": ("WEBKIT_URL", "CLAUDE_PLUGIN_OPTION_URL"),
     "api_key": ("WEBKIT_API_KEY", "CLAUDE_PLUGIN_OPTION_API_KEY"),
@@ -31,6 +32,7 @@ _ENV = {
     "opencli": ("WEBKIT_OPENCLI",),
     "profile": ("WEBKIT_PROFILE",),
     "s2_api_key": ("WEBKIT_S2_API_KEY",),
+    "log": ("WEBKIT_LOG",),
 }
 
 
@@ -46,6 +48,14 @@ def cache_dir() -> Path:
     if os.environ.get("WEBKIT_CACHE_DIR"):
         return Path(os.environ["WEBKIT_CACHE_DIR"]).expanduser()
     base = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+    return base / "web-kit"
+
+
+def state_dir() -> Path:
+    """Where the events log lives (events.jsonl; see events.py)."""
+    if os.environ.get("WEBKIT_STATE_DIR"):
+        return Path(os.environ["WEBKIT_STATE_DIR"]).expanduser()
+    base = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
     return base / "web-kit"
 
 
@@ -93,6 +103,7 @@ class Config:
     opencli: str = ""                # path of the opencli executable (default: from PATH)
     profile: str = ""                # opencli profile alias (default: opencli's own default)
     s2_api_key: str = ""             # Semantic Scholar API key, passed to opencli
+    log: str = ""                    # "off" stops the events log (default: on)
     sources: dict = field(default_factory=dict)  # key -> "flag" | "env:NAME" | "file" | "default"
 
     @property

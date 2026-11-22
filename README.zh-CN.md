@@ -50,6 +50,7 @@ webkit read https://example.org/post           # 短页面直接打印；长页�
 webkit download https://example.com/paper.pdf  # 默认存到 ~/.cache/web-kit/downloads/
 webkit download arXiv:2403.01092               # 论文页或 DOI 会解析到它的 PDF
 webkit status                                  # opencli、Chrome 插件、web-kit 插件
+webkit stats                                   # 最近 7 天的调用情况（事件日志）
 ```
 
 `search` 输出的第一行汇报各引擎结果，例如 `# engines semantic_scholar=error:busy google_scholar=ok:8 openalex=skipped arxiv=skipped`。
@@ -60,6 +61,8 @@ webkit status                                  # opencli、Chrome 插件、web-k
 分工：**opencli** 负责"网站"（每个站点一个适配：网址、页面结构、字段）；**webkit** 负责"Agent"（命令、引擎顺序、统一的结果格式、错误分类和退出码、输出量控制、PDF）。opencli 没有适配的站点，在本仓库的 `opencli-plugin/` 里写一个（站点名不和官方重名；上游有了官方适配就删掉我们的），再在 webkit 的引擎表里加一行。
 
 本机模式说明：Chrome 要开着（否则退出码 5）。会往网页里嵌自己页面的扩展（沉浸式翻译、Zotero、Scholar PDF Reader）会让这些页面无法被自动化（错误 `browser_conflict`）。可用引擎见 `webkit engines`（本机模式没有时间过滤）。PDF 直接下载、不带浏览器 cookie，付费出版商的 PDF 会失败。`read -f html` 不可用。
+
+事件日志：每次 `search`、`read`、`download` 都往 `~/.local/state/web-kit/events.jsonl` 追加一行 JSON（权限 600；超过 10 MB 换新文件，保留 3 个）。内容包括完整的查询词或网址、每个引擎的结果和耗时、页面大小、错误类别、退出码、打印了多少字符，以及调用方（Claude Code 或 Codex，从环境变量判断）。不记 key、页面正文和结果列表。`webkit stats` 汇总这些记录：按命令和按引擎统计结果与耗时、读不了的域名、输出预算使用情况、重复调用。`webkit config set log off` 可以关闭。
 
 ## 远端模式（web-kit 服务端）
 
@@ -74,6 +77,8 @@ docker compose -f backend/docker-compose.yml up -d --build      # 构建上下�
 
 - `8082`：API（`X-API-Key`；`/v2/admin/*` 需要 `X-Admin-Key`；`/healthz` 只回答正常或不正常）
 - `6080`：noVNC，给人用（用户名 `webkit`，密码为管理 key）。在这里登录一次网站即可，profile 保存在 `chrome-data` 卷里。`download --wait-human` 会在这里打开页面。
+
+服务端用同样的格式，每个请求往标准输出写一行（另记调用方地址；正常的 `/healthz` 不记；`WEBKIT_LOG=off` 关闭）：`docker logs web-kit 2>&1 | webkit stats -`。
 
 固定版本的有：Chrome（`CHROME_VERSION`；换 Chrome 版本会让 profile 里所有 Cloudflare 通过凭证失效）、Node 和 opencli。OpenCLI 插件会从应用商店自动更新；如果新版插件和固定的 opencli 不兼容，`webkit doctor` 会显示没连上，这时用更新的 `OPENCLI_VERSION` 重新构建。任何进程退出，supervisord 都会把它重启。
 

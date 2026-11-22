@@ -461,3 +461,123 @@ def test_skill_reading_advice_bounds_matches_and_line_length(capsys):
     assert run("skill", "show") == 0
     text = capsys.readouterr().out
     assert "grep -n -m 10 'term' FILE | cut -c1-200" in text and "Never `cat`" in text
+
+
+# ─── events log ────────────────────────────────────────────────────────────────
+
+def logged(path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def test_search_logs_one_event_with_the_full_query_and_no_key(events_log, monkeypatch, capsys):
+    monkeypatch.setenv("CLAUDECODE", "1")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "s-1")
+    seen = {}
+
+    def h(handler, q, b):
+        seen.update(agent=handler.headers.get("X-Webkit-Agent"), session=handler.headers.get("X-Webkit-Session"))
+        handler._send(200, search_result(
+            [{"rank": 1, "title": "A", "url": "https://a", "engine": "google_scholar"}],
+            [{"engine": "semantic_scholar", "status": "error", "error": "timeout", "message": "x" * 900, "ms": 9000},
+             {"engine": "google_scholar", "status": "ok", "count": 1, "ms": 2100}]))
+    ROUTES[("GET", "/v2/search")] = h
+    assert run("search", "-p", "academic", "temporal", "graph", "forecasting") == 0
+    [ev] = logged(events_log)
+    assert ev["side"] == "cli" and ev["cmd"] == "search" and ev["mode"] == "remote" and ev["exit"] == 0
+    assert ev["q"] == "temporal graph forecasting" and ev["profile"] == "academic" and ev["results"] == 1
+    assert [e["engine"] for e in ev["engines"]] == ["semantic_scholar", "google_scholar"]
+    assert len(ev["engines"][0]["message"]) == 200  # an engine's message is cut short
+    assert ev["agent"] == "claude" and ev["session"] == "s-1" and ev["printed"] > 0
+    assert seen == {"agent": "claude", "session": "s-1"}  # the server learns who calls
+    assert KEY not in events_log.read_text() and ADMIN not in events_log.read_text()
+    assert oct(events_log.stat().st_mode & 0o777) == "0o600"
+
+
+def test_failed_search_logs_its_class_and_engines(events_log, capsys):
+    ROUTES[("GET", "/v2/search")] = lambda h, q, b: h._send(502, {
+        "error": "engines_failed", "message": "every engine failed",
+        "engines": [{"engine": "google", "status": "error", "error": "human_required", "ms": 3000}]})
+    assert run("search", "x") == 3
+    [ev] = logged(events_log)
+    assert ev["error"] == "engines_failed" and ev["engines"][0]["error"] == "human_required" and ev["exit"] == 3
+
+
+def test_read_logs_each_page(events_log, capsys):
+    def page(h, q, b):
+        if "bad" in b["url"]:
+            return h._send(502, {"error": "blocked", "message": "refused"})
+        h._send(200, {"url": b["url"], "final_url": b["url"] + "/", "title": "T", "kind": "html",
+                      "format": "fit", "content": DOC})
+    ROUTES[("POST", "/v2/page")] = page
+    assert run("read", "--max-chars", "1500", "https://ok.org/a", "https://bad.org/b") == 8
+    [ev] = logged(events_log)
+    ok, bad = ev["pages"]
+    assert ok["url"] == "https://ok.org/a" and ok["final_url"] == "https://ok.org/a/" and ok["chars"] > 1500
+    assert ok["truncated"] is True and bad == {"url": "https://bad.org/b", "error": "blocked", "ms": bad["ms"]}
+    assert ev["exit"] == 8 and "error" not in ev  # per-page errors live in pages
+
+
+def test_log_off_and_non_web_commands_log_nothing(events_log, monkeypatch, capsys):
+    ROUTES[("GET", "/v2/status")] = lambda h, q, b: h._send(200, {"ok": True})
+    run("status")
+    assert not events_log.exists()  # only search / read / download are logged
+    monkeypatch.setenv("WEBKIT_LOG", "off")
+    ROUTES[("GET", "/v2/search")] = lambda h, q, b: h._send(200, search_result([], []))
+    assert run("search", "x") == 2
+    assert not events_log.exists()
+    monkeypatch.delenv("WEBKIT_LOG")
+    run("config", "set", "log", "off")
+    assert run("search", "x") == 2
+    assert not events_log.exists()
+    run("config", "show")
+    assert "events log = off" in capsys.readouterr().out
+
+
+def _ev(**kw):
+    return json.dumps({"ts": "2026-11-20T10:00:00+00:00", "side": "cli", "mode": "local", **kw})
+
+
+def test_stats_summarizes_engines_pages_and_repeats(tmp_path, capsys):
+    f = tmp_path / "ev.jsonl"
+    f.write_text("\n".join([
+        "webkit-serve 2.0 on 0.0.0.0:8082",  # a server's other output is skipped
+        _ev(cmd="search", q="a", session="s", exit=0, ms=4000, results=3, printed=900, agent="claude", engines=[
+            {"engine": "semantic_scholar", "status": "error", "error": "timeout", "ms": 9000},
+            {"engine": "google_scholar", "status": "ok", "count": 3, "ms": 2000}]),
+        _ev(cmd="search", q="a", session="s", exit=0, ms=3000, results=2, printed=800, agent="claude", engines=[
+            {"engine": "semantic_scholar", "status": "ok", "count": 2, "ms": 1000},
+            {"engine": "google_scholar", "status": "skipped"}]),
+        _ev(cmd="read", exit=8, ms=5000, printed=300, pages=[
+            {"url": "https://www.researchgate.net/x", "error": "blocked", "ms": 5000}]),
+        _ev(cmd="read", exit=0, ms=2000, printed=1800, spilled=4,
+            pages=[{"url": "https://e.org/a", "chars": 50000, "truncated": True}]),
+        json.dumps({"ts": "2026-11-20T11:00:00+00:00", "side": "server", "cmd": "download", "status": 422,
+                    "error": "not_a_file", "url": "https://e.org/p", "ms": 800}),
+        _ev(cmd="status"),  # not a web command
+    ]) + "\n")
+    assert run("stats", "--days", "0", str(f)) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("5 events, 2026-11-20T10:00 .. 2026-11-20T11:00")
+    assert "sources: cli/local 4 server 1; callers: other 3 claude 2" in out
+    rows = {line.split()[0]: line.split() for line in out.splitlines() if line.startswith(("semantic", "google"))}
+    assert rows["semantic_scholar"][1:5] == ["2", "1", "0", "1"] and "timeout" in rows["semantic_scholar"]
+    assert rows["google_scholar"][1:5] == ["1", "1", "0", "1"]  # the skipped try is not a try
+    assert "blocked 1: researchgate.net 1" in out and "not_a_file 1: e.org 1" in out
+    assert "1 long (outline shown)" in out and "1 calls spilled" in out
+    assert "repeated calls (same session, same query or URL): 1" in out
+    assert run("stats", "--json", "--days", "0", str(f)) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["commands"]["search"]["calls"] == 2 and data["engines"]["semantic_scholar"]["answered"] == 1
+    assert run("stats", "--days", "1", str(f)) == 2  # nothing that recent
+    assert "no search / read / download events" in capsys.readouterr().out
+
+
+def test_stats_reads_the_log_by_default_and_rotates(events_log, monkeypatch, capsys):
+    from webkit import events
+    monkeypatch.setattr(events, "MAX_BYTES", 600)
+    for i in range(12):
+        events.append({"ts": events.now(), "side": "cli", "cmd": "search", "q": f"query {i}", "exit": 0, "pad": "x" * 100})
+    assert sorted(p.name for p in events_log.parent.iterdir()) == ["events.1.jsonl", "events.2.jsonl", "events.jsonl"]
+    assert run("stats") == 0
+    out = capsys.readouterr().out
+    assert "events.jsonl" in out.splitlines()[0] and int(out.split()[0]) < 12  # the oldest file was dropped

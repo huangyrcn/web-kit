@@ -17,6 +17,8 @@ Environment:
   WEBKIT_MAX_DOWNLOAD_MB  largest file /v2/download fetches (default 200)
   WEBKIT_CHROME, WEBKIT_CHROME_PROFILE  what /v2/admin/open opens a tab in
   WEBKIT_IMAGE_TAG    reported by /v2/version
+  WEBKIT_LOG          "off" stops the events log: one JSON line per request on stdout
+                      (docker logs; events.py; `webkit stats -` reads it), except healthy /healthz
 """
 
 from __future__ import annotations
@@ -31,9 +33,9 @@ import threading
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
-from . import API_VERSION, __version__, local
+from . import API_VERSION, __version__, events, local
 from .client import ApiError
 from .config import Config
 
@@ -45,6 +47,9 @@ STATUS = {
     "busy": 503, "unreachable": 503, "engine_unavailable": 503, "timeout": 504,
 }
 MAX_BODY = 64 * 1024
+COMMANDS = {"/v2/search": "search", "/v2/page": "read", "/v2/download": "download", "/v2/status": "status",
+            "/v2/version": "version", "/v2/engines": "engines", "/v2/admin/open": "admin_open",
+            "/v2/admin/ping": "admin_ping", "/healthz": "healthz"}
 
 
 class App:
@@ -64,6 +69,9 @@ class App:
         self.chrome_profile = env.get("WEBKIT_CHROME_PROFILE", "/data/chrome-profile")
         self.image = env.get("WEBKIT_IMAGE_TAG", "")
         self.chrome_version = _chrome_version(self.chrome)
+        self.log = events.enabled(env.get("WEBKIT_LOG"))
+        self.event_sink = None  # default sys.stdout (tests swap it)
+        self._log_lock = threading.Lock()
         local.HUMAN_AT = "in the server's Chrome (noVNC, port 6080)"
         local.OPEN_CHROME = "the server's Chrome is not connected: ask its admin (it restarts on its own)"
 
@@ -106,6 +114,15 @@ class App:
         subprocess.Popen([self.chrome, f"--user-data-dir={self.chrome_profile}", url],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={**os.environ, "DISPLAY": ":99"})
         return {"opened": url}
+
+    def emit(self, event: dict) -> None:
+        if not self.log:
+            return
+        text = events.line(event)
+        with self._log_lock:
+            sink = self.event_sink or sys.stdout
+            sink.write(text)
+            sink.flush()
 
     def healthy(self) -> bool:
         try:
@@ -153,6 +170,10 @@ class Handler(BaseHTTPRequestHandler):
         t0 = time.monotonic()
         u = urlparse(self.path)
         status = 500
+        ev = {"ts": events.now(), "v": __version__, "side": "server", "cmd": COMMANDS.get(u.path, u.path),
+              "method": method, "client": self.client_address[0],
+              "agent": (self.headers.get("X-Webkit-Agent") or "")[:40],
+              "session": (self.headers.get("X-Webkit-Session") or "")[:100]}
         try:
             if method == "GET" and u.path == "/healthz":  # no key, no details: for Docker's healthcheck
                 ok = self.app.healthy()
@@ -166,6 +187,7 @@ class Handler(BaseHTTPRequestHandler):
             self._check_key(kind)
             params = {k: v[-1] for k, v in parse_qs(u.query).items()}
             body = self._body() if method == "POST" else {}
+            ev.update(_asked(u.path, params, body))
             if not self.app.slots.acquire(timeout=self.app.queue_wait):
                 raise local.err("busy", "the server is busy with other requests", hint="retry in a minute")
             try:
@@ -173,19 +195,28 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 self.app.slots.release()
             status = 200
+            _answered(ev, result)
             if isinstance(result, local.Download):
                 self._file(result)
             else:
                 self._json(200, result)
         except ApiError as e:
             status = STATUS.get(e.error, 502)
+            ev["error"] = e.error
+            if e.body.get("engines"):
+                ev["engines"] = events.engines_report(e.body["engines"])
             self._json(status, e.body)
         except Exception as e:  # noqa: BLE001 - one bad request must not kill the server
             traceback.print_exc(file=sys.stderr)
             status = 500
+            ev["error"] = f"crash:{type(e).__name__}"
             self._json(500, {"error": "internal", "message": f"{type(e).__name__}: {e}"[:300]})
         finally:
-            print(f"{method} {u.path} {status} {int((time.monotonic() - t0) * 1000)}ms", file=sys.stderr, flush=True)
+            ms = int((time.monotonic() - t0) * 1000)
+            if ev.get("pages"):
+                ev["pages"][0].update(ms=ms, error=ev.get("error"))
+            if not (u.path == "/healthz" and status == 200):  # the healthcheck every 30 s is not news
+                self.app.emit({**ev, "status": status, "ms": ms})
 
     def _check_key(self, kind: str) -> None:
         header, want = ("X-Admin-Key", self.app.admin_key) if kind == "admin" else ("X-API-Key", self.app.api_key)
@@ -221,6 +252,40 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         while chunk := d.read(1 << 20):
             self.wfile.write(chunk)
+
+
+def _asked(path: str, params: dict, body: dict) -> dict:
+    """What a request asked for, as events-log fields (full query and URL; never keys)."""
+    if path == "/v2/search":
+        ev = {k: params.get(k) for k in ("q", "profile", "engine", "time", "lang")}
+        limit = str(params.get("limit") or "")
+        return {**ev, "limit": int(limit) if limit.isdigit() else None}
+    if path == "/v2/page":
+        return {"pages": [{"url": str(body.get("url") or "")}], "format": body.get("format"),
+                "wait_for": body.get("wait_for"), "scroll": body.get("scroll") or None}
+    if path == "/v2/download":
+        return {"url": params.get("url"), "max_mb": params.get("max_mb"), "allow_html": params.get("allow_html")}
+    if path == "/v2/admin/open":
+        return {"url": params.get("url")}
+    return {}
+
+
+def _answered(ev: dict, result) -> None:
+    """What the answer was, as events-log fields (sizes and counts, never content)."""
+    if isinstance(result, local.Download):
+        h = result.headers
+        final = unquote(h.get("X-Webkit-Final-Url") or "")
+        ev.update(bytes=int(h.get("Content-Length") or 0), content_type=h.get("Content-Type"),
+                  final_url=final if final != ev.get("url") else None,
+                  resolved_from=unquote(h.get("X-Webkit-Resolved-From") or "") or None)
+    elif ev.get("cmd") == "search":
+        ev.update(engines=events.engines_report(result.get("engines")), results=len(result.get("results") or []))
+    elif ev.get("pages"):
+        rec = ev["pages"][0]
+        final = result.get("final_url")
+        rec.update(final_url=final if final != rec["url"] else None,
+                   chars=len(result.get("content") or "") if "content" in result else None,
+                   links=len(result["links"]) if "links" in result else None)
 
 
 def make_server(host: str, port: int, app: App) -> ThreadingHTTPServer:

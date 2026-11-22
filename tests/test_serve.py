@@ -3,6 +3,7 @@ opencli and fake HTTP, driven by the real CLI in remote mode. Offline."""
 
 from __future__ import annotations
 
+import io
 import json
 import threading
 import time
@@ -64,6 +65,7 @@ def web(monkeypatch):
 
 def start(**env):
     app = serve.App({"WEBKIT_API_KEY": KEY, "WEBKIT_ADMIN_KEY": ADMIN, "WEBKIT_CHROME": "true", **env})
+    app.event_sink = io.StringIO()  # the events log, off the captured stdout
     srv = serve.make_server("127.0.0.1", 0, app)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return app, srv, f"http://127.0.0.1:{srv.server_address[1]}"
@@ -191,3 +193,28 @@ def test_admin_open_hands_the_url_to_chrome(server, monkeypatch, capsys):
     with pytest.raises(urllib.error.HTTPError) as e:
         urllib.request.urlopen(bad)
     assert e.value.code == 400 and not opened[1:]
+
+
+def test_the_server_logs_one_line_per_request(server, opencli, capsys, monkeypatch):
+    app, url = server
+    monkeypatch.setenv("CLAUDECODE", "1")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "s-9")
+    opencli["google search"] = ok([{"type": "result", "title": "A", "url": "https://a.org", "snippet": "s"}])
+    assert run("search", "graph", "neural") == 0
+    opencli["web read"] = lambda args: ok({"title": "T", "content": WEB.format(url=args[3], body="Hello")})
+    assert run("read", "https://e.org/p") == 0
+    urllib.request.urlopen(url + "/healthz", timeout=5).read()  # a healthy check is not logged
+    with pytest.raises(urllib.error.HTTPError):
+        urllib.request.urlopen(urllib.request.Request(url + "/v2/search?q=secret", headers={"X-API-Key": "nope"}))
+    deadline = time.monotonic() + 5  # a line is written after its response is sent
+    while len(app.event_sink.getvalue().splitlines()) < 3 and time.monotonic() < deadline:
+        time.sleep(0.02)
+    evs = [json.loads(line) for line in app.event_sink.getvalue().splitlines()]
+    assert [e["cmd"] for e in evs] == ["search", "read", "search"]
+    search, read, denied = evs
+    assert search["q"] == "graph neural" and search["engines"][0]["engine"] == "google" and search["results"] == 1
+    assert search["side"] == "server" and search["status"] == 200 and search["agent"] == "claude"
+    assert search["session"] == "s-9" and search["client"] == "127.0.0.1"
+    assert read["pages"][0]["url"] == "https://e.org/p" and read["pages"][0]["chars"] > 0
+    assert denied["error"] == "unauthorized" and "q" not in denied  # nothing asked is logged before the key
+    assert KEY not in app.event_sink.getvalue() and ADMIN not in app.event_sink.getvalue()

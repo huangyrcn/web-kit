@@ -31,7 +31,7 @@ import time
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from . import API_VERSION, __version__, config
+from . import API_VERSION, __version__, config, events
 from .client import (EXIT_FAILED, EXIT_NO_RESULTS, EXIT_OK, EXIT_USAGE, ApiError, Client)
 from .local import LocalClient, plain_text
 
@@ -104,6 +104,7 @@ class Output:
 
 
 OUT = Output()
+EVENT: dict = {}  # what this command adds to its events-log line (events.py)
 
 
 def out(text: str = "") -> None:
@@ -231,8 +232,10 @@ def cmd_search(args, client: Client) -> int:
         params["engine"] = args.engine
     else:
         params["profile"] = args.profile
+    EVENT.update({k: v for k, v in params.items() if k != "q"}, q=params["q"], read=args.read)
     data = client.get_json("/v2/search", params, timeout=args.timeout or 150)
     results = data.get("results", [])
+    EVENT.update(engines=events.engines_report(data.get("engines")), results=len(results))
     code = EXIT_OK if results else EXIT_NO_RESULTS
     targets = [r["url"] for r in results[: args.read or 0]]
     if args.json:
@@ -367,17 +370,24 @@ def _read_many(client: Client, urls: list[str], fmt: str, output: str | None, ti
     to_files = to_files or bool(output)
     pages = []
     for i, url in enumerate(urls, 1):
+        t0 = time.monotonic()
+        rec = {"url": url}
+        EVENT.setdefault("pages", []).append(rec)
         try:
             page = _page(client, url, fmt, timeout, **page_kw)
         except ApiError as e:
+            rec.update(error=e.error, ms=int((time.monotonic() - t0) * 1000))
             err_json({**e.body, "url": url})
             code = code or e.exit_code
             continue
-        pages.append((i, url, page, _page_text(page)))
+        text = _page_text(page)
+        rec.update(final_url=page.get("final_url") if page.get("final_url") != url else None, chars=len(text),
+                   ms=int((time.monotonic() - t0) * 1000))
+        pages.append((i, url, page, text, rec))
 
     entries = []
     how_shown = False  # how to read a saved page: said once per command
-    for k, (i, url, page, text) in enumerate(pages):
+    for k, (i, url, page, text, rec) in enumerate(pages):
         title = page.get("title") or ""
         meta = {"url": url, **{f: page[f] for f in ("final_url", "title", "kind", "pages", "pdf_url")
                                if page.get(f) not in (None, "")}, "chars": len(text)}
@@ -386,6 +396,7 @@ def _read_many(client: Client, urls: list[str], fmt: str, output: str | None, ti
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text, encoding="utf-8")
             meta["path"] = str(path)
+            rec["to_file"] = True
             if not as_json:
                 out(f"saved {path} ({len(text)} chars) {title}".rstrip())
             entries.append(meta)
@@ -408,6 +419,7 @@ def _read_many(client: Client, urls: list[str], fmt: str, output: str | None, ti
             avail = min(OVERVIEW_MAX, max(0, room - len(header) - len(title_line) - 2))
             lines, fields = _overview(text, path, avail - (0 if how_shown else 330))
             meta.update(truncated=True, path=str(path), **{k: v for k, v in fields.items() if k != "how"})
+            rec["truncated"] = True
             if not as_json:
                 for line in (header, title_line, *lines):
                     if line:
@@ -423,6 +435,8 @@ def _read_many(client: Client, urls: list[str], fmt: str, output: str | None, ti
 
 def cmd_read(args, client: Client) -> int:
     urls = [normalize_target(u) for u in args.urls]
+    EVENT.update(format=args.format, wait_for=args.wait_for, scroll=args.scroll or None, cache=args.cache or None,
+                 output=bool(args.output) or None)
     code, entries = _read_many(client, urls, args.format, args.output, args.timeout or 60, as_json=args.json,
                                wait_for=args.wait_for, scroll=args.scroll, cache=args.cache)
     if args.json:
@@ -459,6 +473,7 @@ def _download_once(client: Client, url: str, dest: Path | None, max_mb: int, all
         ctype = resp.headers.get("Content-Type", "")
         landing = unquote(resp.headers.get("X-Webkit-Resolved-From") or "")
         final = unquote(resp.headers.get("X-Webkit-Final-Url") or "")
+    EVENT.update(bytes=size, content_type=ctype, final_url=final if final != url else None, resolved_from=landing)
     if as_json:
         print_json({"path": str(target), "bytes": size, "content_type": ctype, "final_url": final,
                     **({"resolved_from": landing} if landing else {})})
@@ -473,6 +488,7 @@ def cmd_download(args, client: Client) -> int:
     if dest is not None and args.output.endswith(("/", os.sep)):  # Path() drops the slash that marks a directory
         dest.mkdir(parents=True, exist_ok=True)
     url = normalize_target(args.url)
+    EVENT.update(url=url, allow_html=args.allow_html or None, wait_human=args.wait_human or None)
     deadline = time.monotonic() + args.wait_timeout
     opened = False
     while True:
@@ -609,6 +625,7 @@ def cmd_config(args, _client) -> int:
             shown = config.mask(val) if key.endswith("key") else (val or "(unset)")
             out(f"{key} = {shown}  [{cfg.sources.get(key)}]")
         out(f"download_dir = {config.download_dir()}")
+        out(f"events log = {_tilde(events.log_path()) if events.enabled(cfg.log) else 'off'}")
         return EXIT_OK
     key = args.key.replace("-", "_")
     if key not in config.KEYS:
@@ -624,6 +641,17 @@ def cmd_config(args, _client) -> int:
     path = config.write_file(values)
     out(f"{args.key} saved to {path}")
     return EXIT_OK
+
+
+def cmd_stats(args, _client) -> int:
+    lines, source = events.read_sources(args.files)
+    summary = events.summarize(events.parse(lines, args.days))
+    if args.json:
+        print_json(summary)
+    else:
+        for line in events.render(summary, source if args.files else _tilde(Path(source))):
+            out(line)
+    return EXIT_OK if summary.get("events") else EXIT_NO_RESULTS
 
 
 def cmd_skill(args, _client) -> int:
@@ -650,7 +678,7 @@ class _Parser(argparse.ArgumentParser):
         sys.exit(EXIT_USAGE)
 
 
-CONFIG_KEYS = ("backend", "opencli", "profile", "s2-api-key", "url", "api-key", "admin-key", "vnc-url")
+CONFIG_KEYS = ("backend", "opencli", "profile", "s2-api-key", "url", "api-key", "admin-key", "vnc-url", "log")
 SKILL_DIRS = {"claude": "~/.claude/skills/web-kit", "codex": "~/.codex/skills/web-kit"}
 
 POSITIONING = """\
@@ -662,7 +690,7 @@ the job; when they work, prefer them.
   read      learn what a web page says: URL / DOI / arXiv:ID -> Markdown text
   download  get a file (PDF, data, ...) saved to disk (a DOI or paper page -> its PDF)
 
-  status, doctor, engines, config, skill: health and setup
+  status, doctor, engines, stats, config, skill: health, usage and setup
 
 Order: built-in tools -> search/read/download -> report "not accessible".
 """
@@ -751,11 +779,21 @@ Default destination: {_tilde(config.download_dir())}/ ($WEBKIT_DOWNLOAD_DIR)."""
     en = sub.add_parser("engines", parents=[common], description="list engines, profiles and time-filter support")
     en.set_defaults(func=cmd_engines, default_budget=DIAG_BUDGET)
 
+    sa = sub.add_parser("stats", parents=[common], formatter_class=raw, description=f"""\
+Summarize the events log: outcomes and latency per command and per engine, pages that
+failed (by domain), output budget use, repeated calls. Every search / read / download
+adds one JSON line to {_tilde(events.log_path())} (full query and URLs; never
+keys or page text); `webkit config set log off` stops it. FILE '-' reads stdin, e.g. a
+web-kit server's log:  ssh HOST docker logs web-kit 2>&1 | webkit stats -""")
+    sa.add_argument("files", nargs="*", metavar="FILE", help="event lines to read (default: the log above)")
+    sa.add_argument("--days", type=int, default=7, help="only the last N days (default 7; 0 = all)")
+    sa.set_defaults(func=cmd_stats, default_budget=DIAG_BUDGET)
+
     cf = sub.add_parser("config", description="show or change the CLI config")
     csub = cf.add_subparsers(dest="config_cmd", required=True, parser_class=_Parser)
     csub.add_parser("show", help="effective settings and where each comes from").set_defaults(func=cmd_config)
     csub.add_parser("path", help="config file location").set_defaults(func=cmd_config)
-    cs = csub.add_parser("set", help="set backend / opencli / profile / url / vnc-url (argument), "
+    cs = csub.add_parser("set", help="set backend / opencli / profile / url / vnc-url / log (on|off) (argument), "
                                      "or s2-api-key / api-key / admin-key (stdin)")
     cs.add_argument("key", choices=CONFIG_KEYS)
     cs.add_argument("value", nargs="?")
@@ -775,27 +813,52 @@ Default destination: {_tilde(config.download_dir())}/ ($WEBKIT_DOWNLOAD_DIR)."""
 
 
 def main(argv: list[str] | None = None) -> int:
+    t0 = time.monotonic()
+    EVENT.clear()
     parser = build_parser()
     args = parser.parse_args(argv)
     flags = {"url": getattr(args, "backend_url", None), "api_key": getattr(args, "key", None)}
     cfg = config.load(flags)
     client = LocalClient(cfg) if cfg.backend == "local" else Client(cfg)
     OUT.configure(_budget(args), args.cmd)
+    code = EXIT_FAILED
     try:
         code = args.func(args, client)
     except ApiError as e:
+        EVENT["error"] = e.error
+        if e.body.get("engines") and not EVENT.get("engines"):
+            EVENT["engines"] = events.engines_report(e.body["engines"])
         err_json(e.body)
         code = e.exit_code
     except KeyboardInterrupt:
-        code = 130
+        EVENT["error"], code = "interrupted", 130
     except BrokenPipeError:
         code = EXIT_OK
+    except Exception as e:
+        EVENT["error"] = f"crash:{type(e).__name__}"
+        raise
     finally:
         try:
             OUT.close()
         except BrokenPipeError:
             pass
+        _log_event(cfg, args, code, t0)
     sys.exit(code)
+
+
+def _log_event(cfg, args, code: int, t0: float) -> None:
+    """One events-log line for a search / read / download (events.py)."""
+    if args.cmd not in events.WEB_COMMANDS or not events.enabled(cfg.log):
+        return
+    who = events.caller()
+    try:
+        tty = sys.stdout.isatty()
+    except (AttributeError, ValueError):
+        tty = False
+    events.append({"ts": events.now(), "v": __version__, "side": "cli", "cmd": args.cmd, "mode": cfg.backend,
+                   "server": cfg.url if cfg.backend == "remote" else None, **who, "tty": tty, **EVENT,
+                   "exit": code, "ms": int((time.monotonic() - t0) * 1000), "printed": OUT.used,
+                   "spilled": OUT.spilled, "json": args.json or None, "max_chars": args.max_chars})
 
 
 if __name__ == "__main__":

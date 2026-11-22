@@ -12,7 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from . import __version__
+from . import __version__, events
 from .config import Config
 
 EXIT_OK = 0
@@ -67,7 +67,8 @@ class Client:
         url = self.cfg.url + path
         if params:
             url += "?" + urllib.parse.urlencode({k: v for k, v in params.items() if v not in (None, "", False)})
-        headers = {"User-Agent": f"webkit-cli/{__version__}", "Accept": "application/json"}
+        headers = {"User-Agent": f"webkit-cli/{__version__}", "Accept": "application/json",
+                   **events.caller_headers()}  # who is calling, for the server's events log
         headers["X-Admin-Key" if admin else "X-API-Key"] = self.cfg.admin_key if admin else self.cfg.api_key
         data = None
         if body is not None:

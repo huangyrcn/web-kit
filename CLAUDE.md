@@ -13,8 +13,9 @@ and fetches files for `download` directly (urllib; `read` is for web pages only,
 (`backend/`), behind `src/webkit/serve.py`. The agent skill is generated from the CLI.
 
 ```
-src/webkit/             CLI (search / read / download / status / doctor / engines / config / skill);
-                        local.py = local mode; serve.py = the server (python -m webkit.serve)
+src/webkit/             CLI (search / read / download / status / doctor / engines / stats / config / skill);
+                        local.py = local mode; serve.py = the server (python -m webkit.serve);
+                        events.py = the events log and `webkit stats`
 opencli-plugin/         web-kit's own opencli adapters (biorxiv, medrxiv); declared in opencli-plugin.json (monorepo)
 backend/                the server image: Chrome + OpenCLI extension (Chrome policy) + opencli daemon + webkit-serve
                         + noVNC under supervisord, all as user webkit; build context = the repo root
@@ -60,6 +61,11 @@ The opencli daemon (127.0.0.1:19825) and x11vnc (5900) stay inside the container
   across stdout and stderr; page text beyond it goes to a file, other overflow to one spill file
   named in the last line; `-o` prints paths only; `--json` never changes the amount.
 - An engine never returns `[]` for a page it could not read: it raises a classified error.
+- Events log (`events.py`): one JSON line per search / read / download, the same fields on both
+  sides: CLI -> `$WEBKIT_STATE_DIR/events.jsonl` (0600, rotated), server -> stdout (docker logs,
+  a healthy `/healthz` skipped). Full query and URLs by the user's choice; never keys, page text
+  or result lists. Never raises. `log = off` / `WEBKIT_LOG=off`. Tests write under tmp_path
+  (`tests/conftest.py`).
 
 ## Commands
 
