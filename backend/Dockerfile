@@ -37,7 +37,9 @@ RUN curl -fsSLo /tmp/node.tgz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${
     && npm install -g --no-fund --no-audit --loglevel=error "@jackwener/opencli@${OPENCLI_VERSION}"
 
 # The OpenCLI extension: installed and kept updated by Chrome from the Web Store.
-# Modes are set here, not taken from the build host (a checkout may be 0700).
+# Modes are set here, not taken from the build host (a checkout may be 0700); the policy
+# directory first, since COPY --chmod would give the directories it creates the file's mode.
+RUN install -d -m 755 /etc/opt/chrome/policies/managed
 COPY --chmod=644 backend/chrome-policy.json /etc/opt/chrome/policies/managed/webkit.json
 COPY --chmod=644 backend/supervisord.conf /etc/supervisor/webkit.conf
 COPY --chmod=755 backend/start-xvfb.sh backend/start-chrome.sh backend/start-vnc.sh backend/start-novnc.sh /usr/local/bin/
