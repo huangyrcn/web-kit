@@ -37,14 +37,14 @@ RUN curl -fsSLo /tmp/node.tgz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${
     && npm install -g --no-fund --no-audit --loglevel=error "@jackwener/opencli@${OPENCLI_VERSION}"
 
 # The OpenCLI extension: installed and kept updated by Chrome from the Web Store.
-COPY backend/chrome-policy.json /etc/opt/chrome/policies/managed/webkit.json
-COPY backend/supervisord.conf /etc/supervisor/webkit.conf
-COPY backend/start-xvfb.sh backend/start-chrome.sh backend/start-vnc.sh backend/start-novnc.sh /usr/local/bin/
+# Modes are set here, not taken from the build host (a checkout may be 0700).
+COPY --chmod=644 backend/chrome-policy.json /etc/opt/chrome/policies/managed/webkit.json
+COPY --chmod=644 backend/supervisord.conf /etc/supervisor/webkit.conf
+COPY --chmod=755 backend/start-xvfb.sh backend/start-chrome.sh backend/start-vnc.sh backend/start-novnc.sh /usr/local/bin/
 
 # Everything runs as one unprivileged user.
 RUN useradd -m -u 1000 -s /bin/bash webkit \
     && mkdir -p /data/chrome-profile /opt/webkit && chown webkit:webkit /data/chrome-profile /opt/webkit \
-    && chmod +x /usr/local/bin/start-*.sh \
     && google-chrome-stable --version > /etc/webkit-chrome-version
 USER webkit
 WORKDIR /home/webkit
