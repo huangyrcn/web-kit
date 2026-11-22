@@ -1,9 +1,12 @@
-"""End-to-end checks against a running v2 backend, through the real CLI.
+"""End-to-end checks against a live web-kit, through the real CLI: a web-kit server
+(remote mode) or this machine's Chrome (local mode).
 
-    WEBKIT_INTEGRATION=1 WEBKIT_URL=... WEBKIT_API_KEY=... [WEBKIT_ADMIN_KEY=...] pytest tests/test_integration.py
+    WEBKIT_INTEGRATION=1 WEBKIT_BACKEND=remote WEBKIT_URL=... WEBKIT_API_KEY=... [WEBKIT_ADMIN_KEY=...] \\
+        PYTHONPATH=src pytest tests/test_integration.py
+    WEBKIT_INTEGRATION=1 WEBKIT_BACKEND=local PYTHONPATH=src pytest tests/test_integration.py
 
-Uses live sites (Google, arXiv, example.com), so a failure can be upstream; the
-error class printed by the CLI says which.
+Uses live sites, so a failure can be upstream; the error class printed by the CLI says
+which. Anti-bot checks (exit 6 / 8) skip an engine instead of failing it.
 """
 
 from __future__ import annotations
@@ -12,14 +15,19 @@ import json
 import os
 import subprocess
 import sys
+import urllib.error
 import urllib.request
 
 import pytest
 
 pytestmark = pytest.mark.skipif(os.environ.get("WEBKIT_INTEGRATION") != "1",
-                                reason="set WEBKIT_INTEGRATION=1 with a live backend")
+                                reason="set WEBKIT_INTEGRATION=1 with a live web-kit")
+REMOTE = os.environ.get("WEBKIT_BACKEND") == "remote"
+remote_only = pytest.mark.skipif(not REMOTE, reason="remote mode only")
 
 ARXIV_PDF = "https://arxiv.org/pdf/1706.03762"  # Attention Is All You Need
+SHORT_PAGE = "https://info.cern.ch/hypertext/WWW/TheProject.html"
+LONG_PAGE = "https://en.wikipedia.org/wiki/Knowledge_graph"
 
 
 def webkit(*args, timeout=300, env=None):
@@ -28,113 +36,86 @@ def webkit(*args, timeout=300, env=None):
     return proc.returncode, proc.stdout, proc.stderr
 
 
-def test_auth_is_enforced():
+def last_error(err: str) -> dict:
+    return json.loads(err.strip().splitlines()[-1])
+
+
+@remote_only
+def test_auth_is_enforced_and_healthz_says_only_ok():
     code, _, err = webkit("status", env={"WEBKIT_API_KEY": "wrong"})
     assert code == 4, err
     base = os.environ["WEBKIT_URL"]
-    for path in ("/search?q=x&format=json", "/internal/health", "/"):  # SearXNG / internals never exposed
-        req = urllib.request.Request(base + path, headers={"X-API-Key": os.environ["WEBKIT_API_KEY"]})
-        with pytest.raises(urllib.error.HTTPError) as e:
-            urllib.request.urlopen(req, timeout=15)
-        assert e.value.code == 404
+    with urllib.request.urlopen(base + "/healthz", timeout=30) as r:
+        assert json.load(r) == {"ok": True}
+    req = urllib.request.Request(base + "/v2/nothing", headers={"X-API-Key": os.environ["WEBKIT_API_KEY"]})
+    with pytest.raises(urllib.error.HTTPError) as e:
+        urllib.request.urlopen(req, timeout=15)
+    assert e.value.code == 404
 
 
-def test_status_and_version():
+def test_status():
     code, out, err = webkit("status", "--json")
     data = json.loads(out)
-    assert data["browser"]["connected"], data
-    assert data["version"]["api"] == "v2" and data["version"]["chrome"] != "unknown"
+    assert code == 0 and data["extension_connected"] and data["plugin"], data
+    if REMOTE:
+        assert data["mode"] == "server" and data["chrome"], data
 
 
 def test_engines_listing():
     code, out, _ = webkit("engines", "--json")
-    data = json.loads(out)
-    names = {e["engine"] for e in data["engines"]}
-    assert {"google", "duckduckgo", "semantic_scholar", "arxiv", "bing", "github"} <= names
-
-
-@pytest.mark.parametrize("args,expect_engine", [
-    (("search", "LANTERN temporal knowledge graph forecasting"), None),
-    (("search", "-p", "academic", "temporal knowledge graph forecasting LLM"), None),
-    (("search", "-e", "github", "paper-search-mcp"), "github"),
-    (("search", "-e", "arxiv", "temporal graph link prediction"), "arxiv"),
-])
-def test_search(args, expect_engine):
-    code, out, err = webkit(*args)
-    assert code == 0, (out, err)
-    header = out.splitlines()[0]
-    assert header.startswith("# engines "), header
-    if expect_engine:
-        assert f"{expect_engine}=ok:" in header
+    names = {e["engine"] for e in json.loads(out)["engines"]}
+    assert {"google", "semantic_scholar", "google_scholar", "arxiv", "biorxiv", "medrxiv"} <= names
+    assert not names & {"brave", "duckduckgo", "bing"}
 
 
 @pytest.mark.parametrize("engine,query", [
-    ("google", "LANTERN temporal knowledge graph forecasting"),
-    ("duckduckgo", "LANTERN temporal knowledge graph forecasting"),
-    ("bing", "temporal knowledge graph forecasting"),
+    ("google", "temporal knowledge graph forecasting"),
     ("google_scholar", "temporal knowledge graph forecasting"),
     ("semantic_scholar", "temporal knowledge graph forecasting"),
+    ("openalex", "temporal knowledge graph forecasting"),
     ("arxiv", "temporal knowledge graph"),
+    ("pubmed", "spatial transcriptomics"),
+    ("dblp", "graph transformers"),
+    ("biorxiv", "spatial transcriptomics"),
+    ("medrxiv", "spatial transcriptomics"),
+    ("hackernews", "graph neural networks"),
+    ("stackoverflow", "python asyncio"),
+    ("cnki", "图神经网络"),
+    ("wanfang", "图神经网络"),
+    ("baidu_scholar", "图神经网络"),
 ])
 def test_each_engine_answers_itself(engine, query):
     """A profile hides a broken engine behind its fallback; test each one directly."""
     code, out, err = webkit("search", "-e", engine, "-n", "3", query)
-    if code == 3 and any(f"={c}" in err for c in ("captcha", "blocked", "human_required")):
-        pytest.skip(f"{engine}: upstream anti-bot challenge (solve once via noVNC): {err.splitlines()[-1][:160]}")
+    if code in (3, 6, 8) and any(c in err for c in ("human_required", "blocked", "captcha")):
+        pytest.skip(f"{engine}: anti-bot check (a person can pass it): {err.splitlines()[-1][:160]}")
     assert code == 0, (out, err)
-    assert out.splitlines()[0].startswith(f"# engines {engine}=ok:"), out.splitlines()[0]
+    assert out.startswith(f"# engines {engine}=ok:"), out
     assert "http" in out
+    if engine == "google":  # real result URLs, not Google's opaque /goto redirects
+        assert "google.com/goto?" not in out, out
 
 
-def test_google_time_filter_returns_full_page():
-    code, out, err = webkit("search", "--json", "-e", "google", "--time", "week", "Claude Code")
+def test_read_a_short_page_with_numbered_links():
+    code, out, err = webkit("read", SHORT_PAGE)
     assert code == 0, err
-    assert len(json.loads(out)["results"]) >= 4  # a week of "Claude Code" fills a results page
+    assert "[1]: https://" in out and "](http" not in out
 
 
-def test_search_time_filter_skips_unsupported():
-    code, out, err = webkit("search", "--json", "-p", "academic", "--time", "week", "graph neural network")
-    data = json.loads(out) if out else json.loads(err.splitlines()[-1])
-    report = {e["engine"]: e["status"] for e in data.get("engines", [])}
-    assert report.get("semantic_scholar") == "skipped" and report.get("arxiv") == "skipped"
-
-
-def test_read_html():
-    code, out, err = webkit("read", "--json", "https://example.com")
-    page = json.loads(out)
-    assert code == 0 and page["title"] == "Example Domain" and page["content"], err
-
-
-def test_read_fit_drops_site_chrome(tmp_path):
-    code, out, err = webkit("read", "-o", str(tmp_path / "kg.md"), "https://en.wikipedia.org/wiki/Knowledge_graph")
+def test_read_a_long_page_prints_its_outline():
+    code, out, err = webkit("read", LONG_PAGE)
     assert code == 0, err
-    head = (tmp_path / "kg.md").read_text()[:600]
-    assert "Main menu" not in head and "knowledge" in head.lower()
-
-
-def test_long_page_prints_a_preview_and_a_path():
-    code, out, err = webkit("read", "https://en.wikipedia.org/wiki/Knowledge_graph")
-    assert code == 0, err
-    assert len(out) <= 4400 and "the full text is in" in out
-
-
-def test_read_pdf_as_text():
-    code, out, err = webkit("read", "--max-chars", "4000", ARXIV_PDF, timeout=180)
-    assert code == 0, err
-    assert "<!-- page 1 -->" in out and "Attention" in out
+    assert len(out) <= 2600 and "outline (line: heading" in out and "saved to" in out, out
 
 
 def test_read_links():
-    code, out, err = webkit("read", "-f", "links", "https://example.com")
-    assert code == 0 and "iana.org" in out, err
+    code, out, err = webkit("read", "-f", "links", SHORT_PAGE)
+    assert code == 0 and out.startswith("1\thttps://"), (out, err)
 
 
-def test_crawl(tmp_path):
-    code, out, err = webkit("crawl", "https://example.com", "-o", str(tmp_path), "--max-pages", "2",
-                            "--max-depth", "1", timeout=300)
-    assert code == 0, (out, err)
-    index = json.loads((tmp_path / "index.json").read_text())
-    assert index and any("file" in e for e in index)
+def test_read_sends_files_to_download():
+    code, _, err = webkit("read", ARXIV_PDF)
+    assert code == 3 and last_error(err)["error"] == "not_a_page", err
 
 
 def test_download_pdf(tmp_path):
@@ -142,33 +123,6 @@ def test_download_pdf(tmp_path):
     assert code == 0, err
     [f] = list(tmp_path.iterdir())
     assert f.read_bytes()[:5] == b"%PDF-" and f.suffix == ".pdf"
-
-
-def test_download_http_error():
-    code, _, err = webkit("download", "https://example.com/definitely-missing-file.pdf")
-    assert code == 3 and json.loads(err.splitlines()[-1])["error"] == "upstream_http"
-
-
-@pytest.mark.skipif(not os.environ.get("WEBKIT_ADMIN_KEY"), reason="admin key not provided")
-def test_doctor_with_admin():
-    code, out, err = webkit("doctor")
-    assert "✓ backend reachable" in out and "✓ admin key accepted" in out, out + err
-
-
-def test_read_fit_has_no_skip_links(tmp_path):
-    code, out, err = webkit("read", "-o", str(tmp_path / "s.md"),
-                            "https://link.springer.com/article/10.1007/s11263-015-0816-y", timeout=180)
-    assert code == 0, err
-    head = (tmp_path / "s.md").read_text()[:1500]
-    assert "Skip to" not in head and "ImageNet" in head
-
-
-def test_read_pdf_flag_follows_the_paper_page():
-    code, out, err = webkit("read", "--pdf", "--json", "--max-chars", "3000", "arXiv:2403.01092", timeout=240)
-    assert code == 0, err
-    page = json.loads(out)
-    assert page["kind"] == "pdf" and page["pdf_url"].startswith("https://arxiv.org/pdf/2403.01092")
-    assert "<!-- page 1 -->" in page["content"]
 
 
 def test_download_resolves_a_paper_page(tmp_path):
@@ -179,24 +133,25 @@ def test_download_resolves_a_paper_page(tmp_path):
 
 
 def test_download_of_a_web_page_is_not_a_file():
-    code, _, err = webkit("download", "https://example.com", timeout=180)
-    assert code == 3 and json.loads(err.splitlines()[-1])["error"] == "not_a_file", err
+    code, _, err = webkit("download", SHORT_PAGE, timeout=180)
+    assert code == 3 and last_error(err)["error"] == "not_a_file", err
+
+
+def test_download_http_error():
+    code, _, err = webkit("download", "https://info.cern.ch/definitely-missing-file.pdf")
+    assert code == 3 and last_error(err)["error"] == "not_found", err
+
+
+@remote_only
+@pytest.mark.skipif(not os.environ.get("WEBKIT_ADMIN_KEY"), reason="admin key not provided")
+def test_doctor_with_admin():
+    code, out, err = webkit("doctor")
+    assert "✓ server reachable" in out and "✓ admin key accepted" in out, out + err
 
 
 def test_datadome_wall_is_classified_never_content():
-    # ResearchGate (DataDome) answers datacenter egress with a CAPTCHA (exit 6) or, after
-    # repeated visits, a ban (exit 8); unit tests pin which marker means which.
+    # ResearchGate (DataDome) answers distrusted egress with a CAPTCHA (exit 6) or a ban (exit 8).
     code, _, err = webkit("read", "https://www.researchgate.net/", timeout=180)
     if code == 0:
         pytest.skip("ResearchGate let this egress through")
-    assert (code, json.loads(err.splitlines()[-1])["error"]) in ((6, "human_required"), (8, "blocked")), err
-
-
-def test_google_query_that_used_to_get_ai_mode():
-    code, out, err = webkit("search", "-e", "google",
-                            'Wu Xie "V*: Guided Visual Search as a Core Mechanism for Multimodal LLMs" CVPR 2024 arxiv')
-    if code == 3 and "captcha" in err:
-        pytest.skip("google: upstream anti-bot challenge")
-    assert code == 0 and "google=ok" in out.splitlines()[0], (out, err)
-    assert "guided visual search" in out.lower()
-
+    assert (code, last_error(err)["error"]) in ((6, "human_required"), (8, "blocked")), err
