@@ -21,6 +21,13 @@ def ok(data) -> str:
     return json.dumps({"ok": True, "data": data})
 
 
+@pytest.fixture(autouse=True)
+def restore_hints(monkeypatch):
+    """serve.App points local mode's hints at the server's Chrome: undo it after each test."""
+    monkeypatch.setattr(local, "HUMAN_AT", local.HUMAN_AT)
+    monkeypatch.setattr(local, "OPEN_CHROME", local.OPEN_CHROME)
+
+
 @pytest.fixture
 def opencli(monkeypatch):
     """'site command' -> reply (stdout string or (exit code, stdout, stderr))."""
@@ -122,6 +129,7 @@ def test_read_through_the_server_keeps_local_modes_answers(server, opencli, caps
     assert last_error(capsys)["error"] == "not_a_page"
     opencli["web read"] = (0, WEB.format(url="https://e.org/p", body="Just a moment... Checking your browser"), "")
     assert run("read", "https://e.org/p") == 6  # 409 human_required
+    assert "noVNC" in last_error(capsys)["hint"]  # the server's Chrome, not "this machine"
     opencli["web read"] = (0, WEB.format(url="https://e.org/p", body="You have been blocked. Error 1020"), "")
     assert run("read", "https://e.org/p") == 8  # 502 blocked, never 403 (the CLI reads 403 as a bad key)
 

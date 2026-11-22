@@ -49,6 +49,9 @@ INTERFERING = "another Chrome extension (Immersive Translate, Zotero, Scholar PD
 # web-kit's own opencli adapters (opencli-plugin/ in this repo) for sites opencli has none for.
 PLUGIN_SITES = ("biorxiv", "medrxiv")
 PLUGIN_INSTALL = "opencli plugin install github:huangyrcn/web-kit"
+# Where a person acts on the browser, for hints; the web-kit server (serve.py) sets its own.
+HUMAN_AT = "in Chrome on this machine"
+OPEN_CHROME = "open Chrome (the profile with the OpenCLI extension) on this machine"
 
 
 def err(error: str, message: str, hint: str = "", **extra) -> ApiError:
@@ -109,15 +112,14 @@ def _opencli_error(what: str, code: int, env: dict | None) -> ApiError | None:
     if ecode == "unknown_command":
         return err("engine_unavailable", msg, hint=f"this engine comes from web-kit's opencli plugin: {PLUGIN_INSTALL}")
     if code == 69 or ecode in ("BROWSER_CONNECT", "ADAPTER_LOAD"):
-        return err("unreachable", msg, hint="open Chrome (the profile with the OpenCLI extension) on this machine; "
-                                            "`webkit doctor` shows the connection")
+        return err("unreachable", msg, hint=f"{OPEN_CHROME}; `webkit doctor` shows the connection")
     if ecode == "attach_failed" or "chrome-extension://" in emsg or "Cannot attach to this target" in emsg:
         return err("browser_conflict", msg, hint=f"{INTERFERING} is embedded in that page and blocks the browser "
                                                  "automation; turn it off for this site or read another source")
     if code == 75 or ecode in ("TIMEOUT", "SESSION_BUSY"):
         return err("busy", msg, hint="the browser is busy with other requests; retry in a minute")
     if code == 77 or ecode in ("AUTH_REQUIRED", "LOGIN_WALL"):
-        return err("human_required", msg, hint="log in to the site in Chrome on this machine, then retry")
+        return err("human_required", msg, hint=f"a person logs in to the site {HUMAN_AT}, then retry")
     return err("upstream_http", msg)
 
 
@@ -139,7 +141,7 @@ def _wall_error(url: str, what: str, text: str, limit: int | None = WALL_TEXT_LI
                    hint="do not retry: use another source, or report the URL as not accessible")
     if kind == "human":
         return err("human_required", f"{what}: the site shows a verification page", url=url,
-                   hint="a person can pass it in Chrome on this machine; otherwise report it as not accessible")
+                   hint=f"a person can pass it {HUMAN_AT}; otherwise report it as not accessible")
     return None
 
 
@@ -406,7 +408,7 @@ def search(cfg, params: dict) -> dict:
     tried = [r for r in report if r["status"] != "skipped"]
     if not results and tried and all(r["status"] == "error" for r in tried):
         classes = sorted({r["error"] for r in tried})
-        hint = ("open Chrome (the profile with the OpenCLI extension) on this machine; `webkit doctor`"
+        hint = (f"{OPEN_CHROME}; `webkit doctor`"
                 if "unreachable" in classes else
                 "anti-bot checks stopped every engine: use WebSearch or another profile"
                 if set(classes) & {"captcha", "blocked", "human_required"} else "see `webkit doctor`")

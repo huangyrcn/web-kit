@@ -59,29 +59,24 @@ webkit status                                  # opencli、Chrome 插件、web-k
 
 分工：**opencli** 负责"网站"（每个站点一个适配：网址、页面结构、字段）；**webkit** 负责"Agent"（命令、引擎顺序、统一的结果格式、错误分类和退出码、输出量控制、PDF）。opencli 没有适配的站点，在本仓库的 `opencli-plugin/` 里写一个（站点名不和官方重名；上游有了官方适配就删掉我们的），再在 webkit 的引擎表里加一行。
 
-本机模式说明：Chrome 要开着（否则退出码 5）。会往网页里嵌自己页面的扩展（沉浸式翻译、Zotero、Scholar PDF Reader）会让这些页面无法被自动化（错误 `browser_conflict`）。可用引擎见 `webkit engines`（本机模式没有时间过滤）。PDF 直接下载、不带浏览器 cookie，付费出版商的 PDF 会失败。`crawl` 和 `read -f html` 需要远端后端。
+本机模式说明：Chrome 要开着（否则退出码 5）。会往网页里嵌自己页面的扩展（沉浸式翻译、Zotero、Scholar PDF Reader）会让这些页面无法被自动化（错误 `browser_conflict`）。可用引擎见 `webkit engines`（本机模式没有时间过滤）。PDF 直接下载、不带浏览器 cookie，付费出版商的 PDF 会失败。`read -f html` 不可用。
 
-## 远端模式（服务器后端）
+## 远端模式（web-kit 服务端）
 
-`webkit config set backend remote`、`webkit config set url http://your-server:8082`、`webkit config set api-key`（从标准输入读取）。后端：
+服务端就是放进容器里的本机模式：Chrome 加 OpenCLI 插件（用 Chrome 企业策略强制安装）、opencli 守护进程、web-kit 的 opencli 插件，以及 `webkit-serve`（`src/webkit/serve.py`）。`webkit-serve` 用同一份代码回答 `/v2` 接口，所以两种模式的结果、错误和退出码完全一致。
 
 ```bash
-cd backend
-cp .env.example .env && chmod 600 .env      # key、端口、监听地址
-cp searxng-settings/settings.yml.example searxng-settings/settings.yml
-docker compose up -d --build
+cp backend/.env.example backend/.env && chmod 600 backend/.env   # 监听地址、key
+docker compose -f backend/docker-compose.yml up -d --build      # 构建上下文是仓库根目录
 ```
 
-可选：在 `.env` 里设置 `WEBKIT_S2_API_KEY`（[免费申请](https://www.semanticscholar.org/product/api#api-key)）。设置后 `semantic_scholar` 引擎先调用官方 Graph API（全局每秒最多一次），API 出任何错误再改用网页；不设置则只用网页。
+端口只绑定在可信客户端才能访问的地址上（例如主机的 tailnet 地址，`WEBKIT_BIND`），即使这样，每个接口仍然要 key。客户端：`webkit config set backend remote`、`webkit config set url http://your-server:8082`、`webkit config set api-key`（从标准输入读取），然后 `webkit doctor`。
 
-- `8082`：API（`X-API-Key`；`/v2/admin/*` 需要 `X-Admin-Key`）
-- `6080`：noVNC，仅管理员使用（用户名 `webkit`，密码为管理 key）。在这里登录一次网站，cookie 会保存在 `chrome-profile` 卷里
-- `9223`：原始 CDP，仅管理员使用
+- `8082`：API（`X-API-Key`；`/v2/admin/*` 需要 `X-Admin-Key`；`/healthz` 只回答正常或不正常）
+- `6080`：noVNC，给人用（用户名 `webkit`，密码为管理 key）。在这里登录一次网站即可，profile 保存在 `chrome-data` 卷里。`download --wait-human` 会在这里打开页面。
 
-Chrome 版本是固定的（Dockerfile 里的 `CHROME_VERSION`）：浏览器一升级，profile 里所有 Cloudflare 通过凭证都会失效，所以要有意识地升级。
+固定版本的有：Chrome（`CHROME_VERSION`；换 Chrome 版本会让 profile 里所有 Cloudflare 通过凭证失效）、Node 和 opencli。OpenCLI 插件会从应用商店自动更新；如果新版插件和固定的 opencli 不兼容，`webkit doctor` 会显示没连上，这时用更新的 `OPENCLI_VERSION` 重新构建。任何进程退出，supervisord 都会把它重启。
 
-`webkit status` 会显示出网探测结果（对每个上游域名只做一次 TLS 握手，不消耗搜索次数）、浏览器状态，以及各引擎最近的成败。自愈机制：supervisord 负责重启进程；CDP 连接失效时 watchdog 重启 Chrome 和 API；容器健康检查覆盖 Chrome、API 和 SearXNG。
-
-能力边界：从机房出口访问时，DataDome 保护的站点（如 ResearchGate）会直接拒绝这台服务器（退出码 8）；Cloudflare 保护的出版商在通行凭证过期后（约 30 分钟）会再次要求人工验证，所以 noVNC 里过一次验证只在有人值守时有用。真正的解决办法只有住宅出口。
+能力边界：很多网站不信任机房出口（Google 可能给没登录的新 profile 返回跳转链接或 AI Mode；Scholar 和 DataDome 保护的网站可能直接拒绝）。通过 noVNC 登录能改善一部分，真正的解决办法是住宅出口。
 
 许可证：MIT。

@@ -28,8 +28,8 @@ options:
                         most 20000); longer text goes to a file and its path
                         is printed
   -p, --profile {general,academic,community}
-                        engine chain: general=google>brave, academic=semantic_
-                        scholar>google_scholar>openalex>arxiv,
+                        engine chain: general=google, academic=semantic_schola
+                        r>google_scholar>openalex>arxiv,
                         community=hackernews>stackoverflow (default: general)
   -e, --engine ENGINE   use exactly this engine (see `webkit engines`)
   -n, --limit LIMIT     max results (default 10)
@@ -42,8 +42,9 @@ options:
   -o, --output DIR      with --read: save pages into DIR
 
 connection:
-  --url URL             backend URL (default: config / $WEBKIT_URL)
-  --timeout TIMEOUT     seconds to wait for the backend
+  --url URL             web-kit server URL, remote mode (default: config /
+                        $WEBKIT_URL)
+  --timeout TIMEOUT     seconds to wait for the answer
 ```
 
 ## webkit read
@@ -85,8 +86,9 @@ options:
   --cache               allow a cached copy (default: always fetch fresh)
 
 connection:
-  --url URL             backend URL (default: config / $WEBKIT_URL)
-  --timeout TIMEOUT     seconds to wait for the backend
+  --url URL             web-kit server URL, remote mode (default: config /
+                        $WEBKIT_URL)
+  --timeout TIMEOUT     seconds to wait for the answer
 ```
 
 ## webkit download
@@ -124,42 +126,9 @@ options:
                         seconds to wait with --wait-human (default 300)
 
 connection:
-  --url URL             backend URL (default: config / $WEBKIT_URL)
-  --timeout TIMEOUT     seconds to wait for the backend
-```
-
-## webkit crawl
-
-```
-usage: webkit crawl [-h] [--url URL] [--timeout TIMEOUT] [--json]
-                    [--max-chars N] -o DIR [--strategy {bfs,dfs}]
-                    [--max-depth MAX_DEPTH] [--max-pages MAX_PAGES]
-                    [--include GLOB] [--exclude GLOB] [-f {fit,md}]
-                    url
-
-Bounded synchronous crawl of one site: one markdown file per page plus index.json.
-
-positional arguments:
-  url
-
-options:
-  -h, --help            show this help message and exit
-  --json                JSON output (same amount, different format)
-  --max-chars N         most characters this command prints (default 4000, at
-                        most 20000); longer text goes to a file and its path
-                        is printed
-  -o, --output DIR
-  --strategy {bfs,dfs}
-  --max-depth MAX_DEPTH
-  --max-pages MAX_PAGES
-                        default 10, backend cap 30
-  --include GLOB        only URLs matching (repeatable)
-  --exclude GLOB        skip URLs matching (repeatable)
-  -f, --format {fit,md}
-
-connection:
-  --url URL             backend URL (default: config / $WEBKIT_URL)
-  --timeout TIMEOUT     seconds to wait for the backend
+  --url URL             web-kit server URL, remote mode (default: config /
+                        $WEBKIT_URL)
+  --timeout TIMEOUT     seconds to wait for the answer
 ```
 
 ## webkit status
@@ -168,7 +137,7 @@ connection:
 usage: webkit status [-h] [--url URL] [--timeout TIMEOUT] [--json]
                      [--max-chars N]
 
-backend health: browser, egress, engines
+health: opencli, the Chrome extension, the plugin
 
 options:
   -h, --help         show this help message and exit
@@ -178,8 +147,9 @@ options:
                      printed
 
 connection:
-  --url URL          backend URL (default: config / $WEBKIT_URL)
-  --timeout TIMEOUT  seconds to wait for the backend
+  --url URL          web-kit server URL, remote mode (default: config /
+                     $WEBKIT_URL)
+  --timeout TIMEOUT  seconds to wait for the answer
 ```
 
 ## webkit doctor
@@ -188,7 +158,7 @@ connection:
 usage: webkit doctor [-h] [--url URL] [--timeout TIMEOUT] [--json]
                      [--max-chars N]
 
-check config, keys, versions and backend health
+check config, keys, versions and health
 
 options:
   -h, --help         show this help message and exit
@@ -198,6 +168,7 @@ options:
                      printed
 
 connection:
-  --url URL          backend URL (default: config / $WEBKIT_URL)
-  --timeout TIMEOUT  seconds to wait for the backend
+  --url URL          web-kit server URL, remote mode (default: config /
+                     $WEBKIT_URL)
+  --timeout TIMEOUT  seconds to wait for the answer
 ```

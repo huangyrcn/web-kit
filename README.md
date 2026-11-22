@@ -17,8 +17,9 @@ CLI (`webkit`); it drives that Chrome through [opencli](https://github.com/jackw
 say what to do next, every engine's outcome reported, fallback chains, a bounded
 output, and verification pages never returned as content. It runs only opencli
 *read* commands, as adapters (they attach to a blank tab, reuse warm tabs and
-never evaluate a page script). A server backend is still supported as
-`backend = "remote"` ([below](#remote-mode-server-backend)).
+never evaluate a page script). The same code also runs as a server in a container
+(`backend = "remote"`, [below](#remote-mode-the-web-kit-server)), for machines without
+their own Chrome.
 
 ## Positioning
 
@@ -89,49 +90,48 @@ Local-mode notes: keep Chrome open (exit 5 otherwise). Extensions that embed the
 own pages in sites (Immersive Translate, Zotero, Scholar PDF Reader) block browser
 automation on those pages (error `browser_conflict`). Engines: `webkit engines`
 (no time filters locally). PDFs are fetched without browser cookies, so paywalled
-publisher PDFs fail. `crawl` and `read -f html` need the remote backend.
+publisher PDFs fail. `read -f html` is not available.
 
-## Remote mode (server backend)
+## Remote mode (the web-kit server)
 
-`webkit config set backend remote`, `webkit config set url http://your-server:8082`,
-`webkit config set api-key` (stdin). The backend:
+The server is local mode in a container: Chrome with the OpenCLI extension
+(force-installed by Chrome policy), the opencli daemon, web-kit's opencli plugin, and
+`webkit-serve` (`src/webkit/serve.py`), which answers the `/v2` API with the same
+code, so results, errors and exit codes are the same in both modes.
 
 ```bash
-cd backend
-cp .env.example .env && chmod 600 .env      # keys, ports, bind address
-cp searxng-settings/settings.yml.example searxng-settings/settings.yml
-docker compose up -d --build
+cp backend/.env.example backend/.env && chmod 600 backend/.env   # bind address, keys
+docker compose -f backend/docker-compose.yml up -d --build      # build context: the repo root
 ```
 
-Optional: set `WEBKIT_S2_API_KEY` in `.env` ([free key](https://www.semanticscholar.org/product/api#api-key)). The `semantic_scholar` engine then asks the Graph API first, at most one request per second, and falls back to the website on any API failure; without a key it uses the website only.
+Bind the ports to an address only trusted clients reach (e.g. the host's tailnet
+address, `WEBKIT_BIND`); every route needs its key all the same. Clients:
+`webkit config set backend remote`, `webkit config set url http://your-server:8082`,
+`webkit config set api-key` (stdin), then `webkit doctor`.
 
-- `8082` API (`X-API-Key`; `/v2/admin/*` needs `X-Admin-Key`)
-- `6080` noVNC, admin only (user `webkit`, password = admin key): log in to sites once; cookies persist in the `chrome-profile` volume
-- `9223` raw CDP, admin only
+- `8082` API (`X-API-Key`; `/v2/admin/*` needs `X-Admin-Key`; `/healthz` answers only ok / not ok)
+- `6080` noVNC for a person (user `webkit`, password = admin key): log in to sites
+  once; the profile lives in the `chrome-data` volume. `download --wait-human` opens
+  the page there.
 
-Chrome is pinned (`CHROME_VERSION` in the Dockerfile): a browser upgrade voids every
-Cloudflare pass the profile holds, so bump it deliberately.
+Pinned: Chrome (`CHROME_VERSION`; a new Chrome voids the Cloudflare passes the profile
+holds), Node and opencli. The OpenCLI extension updates itself from the Web Store; if a
+new one stops talking to the pinned opencli, `webkit doctor` shows it as not connected:
+rebuild with a newer `OPENCLI_VERSION`. supervisord restarts any process that exits.
 
-`webkit status` shows the egress probe (a TLS handshake per upstream host, no
-queries spent), browser health and recent per-engine outcomes. Self-healing:
-supervisord restarts processes; a watchdog restarts Chrome + API when the CDP
-link is dead; the container healthcheck covers Chrome, API and SearXNG.
-
-Limits: from a datacenter egress, sites behind DataDome (e.g. ResearchGate) refuse
-the server outright (exit 8), and Cloudflare-protected publishers ask for an
-interactive check again after their pass expires (about 30 minutes), so a noVNC
-pass helps only while a person is around. A residential egress is the only real fix.
+Limits: a datacenter egress is distrusted by many sites (Google may answer a fresh,
+logged-out profile with redirect links or its AI mode; Scholar and DataDome sites may
+refuse it). Logging in through noVNC helps some; a residential egress is the real fix.
 
 ## API
 
 | Route | Purpose |
 |---|---|
 | `GET /v2/search?q=&profile=\|engine=&limit=&time=&lang=` | search with fallback chain |
-| `GET /v2/engines` | engines, kinds, time-filter support, profiles |
-| `POST /v2/page {url, format: fit\|md\|html\|links\|json, pdf, ...}` | read a page / PDF (`pdf`: the PDF the page links) |
-| `POST /v2/crawl {url, strategy, max_depth, max_pages, include, exclude}` | bounded crawl |
-| `GET /v2/download?url=&allow_html=` | stream a file with the browser's cookies; a paper page resolves to its PDF, other pages are `not_a_file` |
+| `GET /v2/engines` | engines, kinds, profiles |
+| `POST /v2/page {url, format: fit\|md\|links\|json, wait_for}` | read a web page as Markdown (files: `not_a_page`) |
+| `GET /v2/download?url=&allow_html=&max_mb=` | stream a file; a paper page or DOI resolves to its PDF, other pages are `not_a_file` |
 | `GET /v2/status`, `GET /v2/version` | health and versions |
-| `GET /v2/admin/open?url=` | open a URL for a human (noVNC) |
+| `GET /v2/admin/open?url=`, `GET /v2/admin/ping` | open a URL in the server's Chrome for a person (noVNC); check the admin key |
 
 License: MIT.

@@ -64,6 +64,8 @@ class App:
         self.chrome_profile = env.get("WEBKIT_CHROME_PROFILE", "/data/chrome-profile")
         self.image = env.get("WEBKIT_IMAGE_TAG", "")
         self.chrome_version = _chrome_version(self.chrome)
+        local.HUMAN_AT = "in the server's Chrome (noVNC, port 6080)"
+        local.OPEN_CHROME = "the server's Chrome is not connected: ask its admin (it restarts on its own)"
 
     # ─── routes ────────────────────────────────────────────────────────────────
     # Each returns (status, JSON body) or, for a download, a local.Download.

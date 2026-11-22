@@ -10,15 +10,15 @@ from . import API_VERSION, __version__
 
 _HEADER = """---
 name: web-kit
-description: "Fallback web access through the user's own logged-in Chrome on this machine (`webkit` CLI, via opencli), for when the built-in web tools fail or cannot do the job. Use when web search is out of quota or erroring (\\"Web search was not performed\\"); a page read fails (403, 429, timeout, too large, unsupported type) or returns a verification or login page instead of content (\\"Just a moment\\", \\"请稍候\\", \\"Verify you are human\\", reCAPTCHA, OpenReview or Cloudflare checks, a /challenge redirect, HTML where a PDF was expected); you need a page's exact full text and the built-in reader only summarizes; you need a file itself (a paper PDF by URL, DOI or arXiv ID); or you need Google Scholar, Semantic Scholar or arXiv results. 读不了、被拦、验证页、下载论文 PDF、原文全文。 Not the default for search or reading; never for posting, submitting forms, purchases or account changes."
+description: "Fallback web access through a real, logged-in Chrome (`webkit` CLI, via opencli: the user's own Chrome on this machine, or a web-kit server's), for when the built-in web tools fail or cannot do the job. Use when web search is out of quota or erroring (\\"Web search was not performed\\"); a page read fails (403, 429, timeout, too large, unsupported type) or returns a verification or login page instead of content (\\"Just a moment\\", \\"请稍候\\", \\"Verify you are human\\", reCAPTCHA, OpenReview or Cloudflare checks, a /challenge redirect, HTML where a PDF was expected); you need a page's exact full text and the built-in reader only summarizes; you need a file itself (a paper PDF by URL, DOI or arXiv ID); or you need Google Scholar, Semantic Scholar or arXiv results. 读不了、被拦、验证页、下载论文 PDF、原文全文。 Not the default for search or reading; never for posting, submitting forms, purchases or account changes."
 ---
 
 # web-kit (`webkit` CLI {version}, API {api})
 
 Use the built-in web tools first (Claude Code: WebSearch / WebFetch; Codex: web search / open /
 find). web-kit takes over when they fail, are blocked or out of quota, or cannot do the job. It
-drives the user's own Chrome on this machine (their logins, their network) through opencli.
-Use `webkit` only: never call `opencli` yourself.
+drives a real Chrome through opencli: the user's own on this machine (their logins, their network),
+or a web-kit server's (`webkit doctor` says which). Use `webkit` only: never call `opencli` yourself.
 
 ## Which command
 
@@ -47,13 +47,13 @@ A web page: `read`. A file (a PDF too): `download`; `read` answers `not_a_page` 
 ## When web-kit fails
 
 - Exit 6 (needs a person) or 8 (blocked): do not retry and do not wait. Report the URL as "not
-  accessible" and continue with other sources. (A person can pass exit-6 pages in Chrome on this
-  machine.)
+  accessible" and continue with other sources. (A person can pass exit-6 pages in that Chrome:
+  on this machine, or in the server's noVNC; the error's hint says where.)
 - Exit 7 (busy): retry in a minute; do not start more parallel `webkit` calls.
 - Exit 3: retry once at most, then report. Error `browser_conflict`: another Chrome extension
   (Immersive Translate, Zotero, ...) blocks automation on that page: use another source.
-- Exit 5: Chrome with the OpenCLI extension is not running or not connected: ask the user to open
-  Chrome, then run `webkit doctor`.
+- Exit 5: the browser is not reachable (local: Chrome with the OpenCLI extension is not running or
+  not connected; remote: the web-kit server is down): tell the user, then run `webkit doctor`.
 - Errors are one JSON line on stderr; its `hint` says what to do next.
 
 ## Rules
@@ -71,7 +71,7 @@ A web page: `read`. A file (a PDF too): `download`; `read` answers `not_a_page` 
   (`grep -m1 '^\\[N\\]:' FILE`). `-f links` prints only that list (N, URL, link text).
 - `search` output starts with `# engines semantic_scholar=ok:8 google_scholar=skipped ...`. `error:unreachable` on
   every engine means Chrome is not connected: say so, do not guess results.
-- One browser (the user's) and one exit IP serve every agent: no bulk searching, few parallel calls.
+- One browser and one exit IP serve every agent: no bulk searching, few parallel calls.
 - `download` fetches files directly, without browser cookies: paywalled publisher PDFs fail (exit 8);
   prefer arXiv, PMC or other open copies.
 
