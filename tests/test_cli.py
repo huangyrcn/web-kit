@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -230,7 +231,7 @@ def test_blocked_maps_to_exit_8(capsys):
     assert json.loads(capsys.readouterr().err.strip().splitlines()[-1])["error"] == "blocked"
 
 
-def test_read_targets_cap_and_pdf_flag(tmp_path):
+def test_read_targets_and_no_pdf_flag(tmp_path):
     calls = []
 
     def page(h, q, b):
@@ -241,9 +242,7 @@ def test_read_targets_cap_and_pdf_flag(tmp_path):
     assert [c["url"] for c in calls] == ["https://doi.org/10.1145/3774904.3792101", "https://doi.org/10.1016/A.b",
                                          "https://arxiv.org/abs/2403.01092v2", "https://x/y"]
     assert all(c["max_chars"] == 0 and "pdf" not in c for c in calls)
-    calls.clear()
-    assert run("read", "--pdf", "-o", str(tmp_path / "p.md"), "arXiv:2403.01092") == 0
-    assert calls[0]["pdf"] is True and calls[0]["max_chars"] == 0
+    assert run("read", "--pdf", "arXiv:2403.01092") == 1  # files are `download`'s job
 
 
 def test_download_reports_resolved_pdf_and_not_a_file(capsys):
@@ -304,10 +303,34 @@ def test_long_page_is_saved_with_a_preview(tmp_path, capsys):
     _serve_pages()
     assert run("read", "https://x/a") == 0
     o, n = _stdout_len(capsys)
-    assert n <= cli.DEFAULT_BUDGET
+    assert n <= cli.OVERVIEW_MAX + 400
     [path] = list((tmp_path / "cache" / "pages").iterdir())
     assert path.read_text() == BIG and str(path) in o
     assert "--max-chars 0" not in o and "grep -n -m 10 'term' FILE | cut -c1-200" in o
+    assert o.count("lorem") <= 6  # the first paragraph, not the page
+
+
+DOC = ("# Doc\n\nIntro line\n\n" + "".join(
+    f"## Part {i} [edit][{i}]\n\n" + "Some words about this part of the document, long enough to read. " * 40
+    + "\n\n### Detail\n\nmore\n\n```\n# not a heading\n```\n\n" for i in range(1, 41))
+    + "\n\n" + "\n".join(f"[{i}]: https://x/edit/{i}" for i in range(1, 41)))
+
+
+def test_long_page_prints_its_outline_with_line_numbers(capsys):
+    _serve_pages(content=DOC)
+    assert run("read", "https://x/a") == 0
+    o, n = _stdout_len(capsys)
+    lines = DOC.splitlines()
+    assert n <= cli.OVERVIEW_MAX + 400 and "# Big page" in o and "not a heading" not in o
+    first = lines.index("[1]: https://x/edit/1") + 1
+    assert f"text: lines 1-{first - 2}, link URLs: {first}-{len(lines)}" in o
+    shown = re.findall(r"^\s+(\d+)  (#+ .*)$", o, re.M)
+    assert len(shown) >= 20 and all(lines[int(k) - 1].startswith(h.split(" [")[0].split(" edit")[0]) for k, h in shown)
+    assert "## Part 1 edit" in o  # link markers dropped from headings
+    assert "headings, all: grep -n '^#' FILE" in o and "grep -m1 '^\\[N\\]:' FILE" in o
+    assert run("read", "--json", "https://x/a") == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["truncated"] and data["outline"][0] == {"line": 1, "heading": "# Doc"} and "content" not in data
 
 
 def test_short_page_is_printed(capsys):
@@ -420,7 +443,7 @@ def test_batch_notes_stay_inside_the_budget(tmp_path, capsys, pages):
     assert len(list((tmp_path / "cache" / "pages").iterdir())) == pages
     if pages == 100:  # the notes that did not fit are in the spill file, not lost
         [spill] = list((tmp_path / "cache" / "output").iterdir())
-        assert spill.read_text().count("the full text is in") == pages and str(spill) in c.out
+        assert spill.read_text().count("; saved to ") == pages and str(spill) in c.out
 
 
 def test_batch_errors_share_the_budget_and_do_not_repeat_hints(tmp_path, capsys):

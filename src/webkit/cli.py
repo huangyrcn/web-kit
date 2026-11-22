@@ -2,8 +2,9 @@
 server (web-kit v2 backend).
 
 Output is compact text for agents and humans; --json changes the format, never the
-amount. Every command prints at most --max-chars characters (default 4000): page text
-beyond that is saved to a file and only its path is printed. Errors go to stderr as one
+amount. Every command prints at most --max-chars characters (default 4000): a longer
+page is saved to a file, and only its outline (line numbers of its headings) and path
+are printed. Errors go to stderr as one
 JSON line: {"error": <class>, "message": ..., "hint": ...}; the hint says what to do next.
 
 Exit codes:
@@ -32,7 +33,7 @@ from urllib.parse import unquote, urlparse
 
 from . import API_VERSION, __version__, config
 from .client import (EXIT_FAILED, EXIT_NO_RESULTS, EXIT_OK, EXIT_USAGE, ApiError, Client)
-from .local import LocalClient
+from .local import LocalClient, plain_text
 
 PROFILES = ("general", "academic", "community")
 TIME_RANGES = ("day", "week", "month", "year")
@@ -40,6 +41,8 @@ DEFAULT_BUDGET = 4000   # chars a content command prints (search / read / crawl 
 MAX_BUDGET = 20000      # hard ceiling for --max-chars; full text only ever goes to files
 DIAG_BUDGET = 20000     # status / doctor / engines
 NOTE_RESERVE = 300      # room kept for each "saved to ..." line
+OVERVIEW_MAX = 2000     # what a long page prints at most: size, path, first paragraph, outline
+LEAD_MAX = 300
 FINAL_RESERVE = 300     # room kept for the closing "more output in FILE" line
 MIN_BUDGET = 600        # below this the closing line itself would not fit
 ERR_LINE_MAX = 1200
@@ -261,19 +264,17 @@ def cmd_search(args, client: Client) -> int:
     return code
 
 
-def _page(client: Client, url: str, fmt: str, timeout: int, wait_for=None, scroll=False, cache=False,
-          pdf=False) -> dict:
+def _page(client: Client, url: str, fmt: str, timeout: int, wait_for=None, scroll=False, cache=False) -> dict:
     body = {"url": url, "format": fmt, "max_chars": 0, "timeout": timeout,
             "wait_for": wait_for, "scroll": scroll, "cache": cache}
-    if pdf:
-        body["pdf"] = True
     return client.post_json("/v2/page", {k: v for k, v in body.items() if v is not None},
                             timeout=timeout + 45)
 
 
 def _page_text(page: dict) -> str:
-    if page.get("format") == "links":
-        return "\n".join(f"{l['href']}\t{l.get('text', '')}" for l in page.get("links", []))
+    if page.get("format") == "links":  # N (as [text][N] in the page text), URL, link text
+        return "\n".join("\t".join(([str(l["n"])] if "n" in l else []) + [l["href"], l.get("text", "")])
+                         for l in page.get("links", []))
     if page.get("format") == "json":
         return json.dumps(page, ensure_ascii=False, indent=2)
     return page.get("content", "")
@@ -289,19 +290,76 @@ def _page_path(output: str | None, single_file: bool, i: int, url: str, page: di
     return _cache_file("pages", f"{name}-{digest}", _ext(fmt))
 
 
-def _cut(text: str, limit: int) -> str:
-    """At most `limit` chars, ending at a line break when one is reasonably close."""
-    if len(text) <= limit:
-        return text
-    cut = text.rfind("\n", 0, limit)
-    return text[: cut if cut > limit // 2 else limit]
+_HEADING = re.compile(r"^(#{1,6})\s+(.+?)(?:\s+#+)?\s*$")
+_PROSE = re.compile(r"^(?![#<|>!\-*+\d\[]|\s|```|~~~)")
+
+
+def _outline(text: str) -> tuple[str, list[tuple[int, int, str]], int]:
+    """(first paragraph, headings as (line, level, text), lines) of a Markdown page;
+    fenced code is skipped."""
+    lead, heads, fence, n = "", [], False, 0
+    for n, line in enumerate(text.splitlines(), 1):
+        if line.startswith(("```", "~~~")):
+            fence = not fence
+            continue
+        if fence:
+            continue
+        if m := _HEADING.match(line):
+            heads.append((n, len(m.group(1)), plain_text(m.group(2))[:100]))
+        elif not lead and _PROSE.match(line) and len(line) >= 80 and " " in line:
+            lead = plain_text(line)
+            lead = lead[:LEAD_MAX] + "…" if len(lead) > LEAD_MAX else lead
+    return lead, heads, n
+
+
+def _fit_outline(heads: list[tuple[int, int, str]], room: int) -> list[tuple[int, int, str]]:
+    """The headings that fit in `room` chars: deeper levels go first, then the tail."""
+    def size(hs):
+        return sum(len(h[2]) + h[1] + 9 for h in hs)
+    for depth in (6, 3, 2, 1):
+        kept = [h for h in heads if h[1] <= depth]
+        if kept and size(kept) <= room:
+            return kept
+    kept = [h for h in heads if h[1] <= min((h[1] for h in heads), default=1)]
+    while kept and size(kept) > room:
+        kept.pop()
+    return kept
+
+
+def _overview(text: str, path: Path, room: int) -> tuple[list[str], dict]:
+    """What a long page prints instead of its text: size and path, the first paragraph,
+    and the outline with line numbers, in at most `room` chars (lines, JSON fields)."""
+    lead, heads, nlines = _outline(text)
+    table = re.search(r"\n\n\[1\]: \S", text)  # the link list at the end
+    has_links = table is not None
+    where = ""
+    if table:
+        first = text.count("\n", 0, table.start()) + 3
+        where = f" (text: lines 1-{first - 2}, link URLs: {first}-{nlines})"
+    lines = [f"[{len(text)} chars, {nlines} lines{where}; saved to {path}]"]
+    room -= len(lines[0]) + 1
+    fields: dict = {"lines": nlines}
+    if lead and len(lead) + 1 <= room - 200:
+        lines.append(lead)
+        fields["lead"] = lead
+        room -= len(lead) + 1
+    kept = _fit_outline(heads, room - 80)
+    if kept:
+        more = f"; {len(kept)} of {len(heads)} headings, all: grep -n '^#' FILE" if len(kept) < len(heads) else ""
+        lines.append(f"outline (line: heading{more}):")
+        lines += [f"{n:>6}  {'#' * level} {h}" for n, level, h in kept]
+        fields["outline"] = [{"line": n, "heading": f"{'#' * level} {h}"} for n, level, h in kept]
+    fields["how"] = ("read lines START-END: sed -n 'START,ENDp' FILE | cut -c1-500 (or your file tool with an "
+                     "offset and a limit); find a term: grep -n -m 10 'term' FILE | cut -c1-200"
+                     + ("; the URL of link [N]: grep -m1 '^\\[N\\]:' FILE" if has_links else ""))
+    return lines, fields
 
 
 def _read_many(client: Client, urls: list[str], fmt: str, output: str | None, timeout: int,
                as_json: bool = False, to_files: bool = False, **page_kw) -> tuple[int, list[dict]]:
     """Read pages under the command's output budget. With -o (or to_files) every page goes
     to a file and only a manifest is printed. Otherwise a page that fits the budget is
-    printed and a longer one is saved to the cache with a preview. Returns (exit code,
+    printed and a longer one is saved to the cache with its outline. Returns (exit code,
     one manifest entry per page); with as_json nothing is printed and the caller prints
     the entries."""
     code = EXIT_OK
@@ -318,6 +376,7 @@ def _read_many(client: Client, urls: list[str], fmt: str, output: str | None, ti
         pages.append((i, url, page, _page_text(page)))
 
     entries = []
+    how_shown = False  # how to read a saved page: said once per command
     for k, (i, url, page, text) in enumerate(pages):
         title = page.get("title") or ""
         meta = {"url": url, **{f: page[f] for f in ("final_url", "title", "kind", "pages", "pdf_url")
@@ -345,15 +404,19 @@ def _read_many(client: Client, urls: list[str], fmt: str, output: str | None, ti
         else:
             path = _page_path(None, False, i, url, page, fmt)
             path.write_text(text, encoding="utf-8")
-            preview = _cut(text, max(0, room - len(header) - 2))
-            meta.update(content=preview, truncated=True, path=str(path))
+            title_line = f"# {title}" if title and not header else ""
+            avail = min(OVERVIEW_MAX, max(0, room - len(header) - len(title_line) - 2))
+            lines, fields = _overview(text, path, avail - (0 if how_shown else 330))
+            meta.update(truncated=True, path=str(path), **{k: v for k, v in fields.items() if k != "how"})
             if not as_json:
-                if header:
-                    out(header)
-                if preview:
-                    out(preview)
-                out(f"[{len(preview)} of {len(text)} chars shown; the full text is in {path}: locate what you "
-                    "need with grep -n -m 10 'term' FILE | cut -c1-200, then read only those lines]")
+                for line in (header, title_line, *lines):
+                    if line:
+                        out(line)
+                if not how_shown:
+                    out(f"[{fields['how']}]")
+            elif not how_shown:
+                meta["how"] = fields["how"]
+            how_shown = True
         entries.append(meta)
     return code, entries
 
@@ -361,7 +424,7 @@ def _read_many(client: Client, urls: list[str], fmt: str, output: str | None, ti
 def cmd_read(args, client: Client) -> int:
     urls = [normalize_target(u) for u in args.urls]
     code, entries = _read_many(client, urls, args.format, args.output, args.timeout or 60, as_json=args.json,
-                               wait_for=args.wait_for, scroll=args.scroll, cache=args.cache, pdf=args.pdf)
+                               wait_for=args.wait_for, scroll=args.scroll, cache=args.cache)
     if args.json:
         print_json(entries if len(urls) > 1 else (entries[0] if entries else {}), summary={"pages": len(entries)})
     return code
@@ -528,7 +591,6 @@ def _local_lines(st: dict) -> list[tuple[bool, str]]:
              f"browser: OpenCLI extension {'connected' if st.get('extension_connected') else 'NOT CONNECTED'}"
              f"{' (profile ' + st['profile'] + ')' if st.get('profile') else ''}; profiles: {prof or '-'}"
              + (f" — {st['error']}" if st.get("error") else "")),
-            (bool(st.get("pdftotext")), f"pdftotext {'ok' if st.get('pdftotext') else 'MISSING (apt install poppler-utils)'}"),
             (True, f"Semantic Scholar API key: {'set' if st.get('s2_api_key') else 'not set (shared anonymous limits)'}"),
             (True, "web-kit opencli plugin (biorxiv, medrxiv): " + ("installed" if st.get("plugin")
                    else "NOT INSTALLED — opencli plugin install github:huangyrcn/web-kit"))]
@@ -559,7 +621,7 @@ def cmd_doctor(args, client: Client) -> int:
         checks = _local_lines(client.get_json("/v2/status"))
         for ok, msg in checks:
             out(f"{'✓' if ok else '✗'} {msg}")
-        return EXIT_OK if all(ok for ok, _ in checks[:3]) else EXIT_FAILED
+        return EXIT_OK if all(ok for ok, _ in checks[:2]) else EXIT_FAILED
     out(f"url: {cfg.url}  [{cfg.sources.get('url')}]")
     out(f"api key: {config.mask(cfg.api_key)}  [{cfg.sources.get('api_key')}]")
     out(f"admin key: {config.mask(cfg.admin_key)}  [{cfg.sources.get('admin_key')}]")
@@ -661,8 +723,8 @@ Use it when the built-in web tools fail, are blocked or out of quota, or cannot 
 the job; when they work, prefer them.
 
   search    find URLs: raw result links + snippets, no answer; no WebSearch quota
-  read      learn what a page says: page / PDF / DOI / arXiv:ID -> text
-  download  get the file itself, saved to disk (a DOI or paper page -> its PDF)
+  read      learn what a web page says: URL / DOI / arXiv:ID -> Markdown text
+  download  get a file (PDF, data, ...) saved to disk (a DOI or paper page -> its PDF)
   crawl     a few pages of one site into a directory
 
   status, doctor, engines, config, skill: health and setup
@@ -710,19 +772,20 @@ First line: '# engines <engine>=<ok:N|empty|error:CLASS|skipped> ...'.""")
     s.set_defaults(func=cmd_search, default_budget=DEFAULT_BUDGET)
 
     r = sub.add_parser("read", parents=[common], formatter_class=raw, description=f"""\
-Learn what a page says, as text. Use it when the built-in reader fails (403, 429,
-timeout, too large), returns a verification or login page, or gives a summary where
-you need the exact text (quotes, numbers, tables, a full paper).
-Targets: URLs, DOIs (10.1145/... or doi:...), arXiv IDs (arXiv:2403.01092 -> abstract page).
-PDFs come back as extracted text with '<!-- page N -->' markers; --pdf reads the PDF a
-paper page links instead of the page. A verification page is never returned as
-content: it is exit 6 (needs a person) or 8 (blocked).
+Learn what a web page says, as Markdown. Use it when the built-in reader fails (403,
+429, timeout, too large), returns a verification or login page, or gives a summary
+where you need the exact text (quotes, numbers, tables).
+Targets: URLs, DOIs (10.1145/... or doi:... -> the paper's page), arXiv IDs
+(arXiv:2403.01092 -> abstract page). Links are [text][N], their URLs listed at the end
+as '[N]: URL'. A PDF or other file is not a page (error not_a_page): `webkit download`
+it. A verification page is never returned as content: it is exit 6 (needs a person)
+or 8 (blocked).
 Output: a page that fits --max-chars is printed; a longer one is saved to a file and
-only a preview and the path are printed. With -o, only paths are printed.""")
+only its size, first paragraph and outline (line numbers of its headings) are printed.
+With -o, only paths are printed.""")
     r.add_argument("urls", nargs="+", metavar="TARGET")
-    r.add_argument("--pdf", action="store_true", help="read the paper PDF the page links (citation_pdf_url)")
     r.add_argument("-f", "--format", choices=("fit", "md", "html", "links", "json"), default="fit",
-                   help="fit = main content (default), md = full page, html, links, json")
+                   help="fit = main content (default), md = full page, html, links (N, URL, text), json")
     r.add_argument("-o", "--output", metavar="PATH", help="save to FILE (one target) or DIR; prints one line per page")
     r.add_argument("--wait-for", metavar="CSS|MS", help="CSS selector to wait for, or milliseconds")
     r.add_argument("--scroll", action="store_true", help="scroll the full page first (lazy content)")
@@ -730,10 +793,12 @@ only a preview and the path are printed. With -o, only paths are printed.""")
     r.set_defaults(func=cmd_read, default_budget=DEFAULT_BUDGET)
 
     d = sub.add_parser("download", parents=[common], formatter_class=raw, description=f"""\
-Get the file itself (PDF, archive, dataset), saved to disk through the backend
-browser, so its logins and cookies apply. Prints the saved path, not the content.
-Targets: URLs, DOIs, arXiv IDs. A paper page resolves to the PDF it links; any other
-web page is an error (not_a_file): use `read` for text.
+Get the file itself (PDF, archive, dataset), saved to disk as it is. Prints the saved
+path, not the content: open the file with your own tools. Local mode fetches it
+directly, without browser cookies (paywalled PDFs fail: prefer open copies).
+Targets: URLs, DOIs, arXiv IDs. A paper page resolves to the PDF it links (arXiv, the
+DOI's open-access copy, citation_pdf_url); any other web page is an error
+(not_a_file): use `read` for text.
 Default destination: {_tilde(config.download_dir())}/ ($WEBKIT_DOWNLOAD_DIR).""")
     d.add_argument("url", metavar="TARGET")
     d.add_argument("-o", "--output", metavar="PATH", help="target file or directory")

@@ -7,7 +7,8 @@ Guidance for Claude Code when working in this repository.
 web-kit v2: web access for agents through a real, logged-in Chrome. The stdlib-only
 CLI (`webkit`) runs in **local mode** by default: `src/webkit/local.py` drives this
 machine's Chrome through opencli adapters (`opencli <site> search`, `opencli web read`)
-and fetches PDFs/files directly (urllib + pdftotext), answering in the same shapes as
+and fetches files for `download` directly (urllib; `read` is for web pages only, links as
+`[text][N]` with the URLs listed at the end), answering in the same shapes as
 the backend API. `backend = "remote"` uses the backend container instead (one
 authenticated HTTP API, `/v2/*`). The agent skill is generated from the CLI.
 

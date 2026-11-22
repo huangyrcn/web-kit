@@ -50,19 +50,21 @@ connection:
 
 ```
 usage: webkit read [-h] [--url URL] [--timeout TIMEOUT] [--json]
-                   [--max-chars N] [--pdf] [-f {fit,md,html,links,json}]
-                   [-o PATH] [--wait-for CSS|MS] [--scroll] [--cache]
+                   [--max-chars N] [-f {fit,md,html,links,json}] [-o PATH]
+                   [--wait-for CSS|MS] [--scroll] [--cache]
                    TARGET [TARGET ...]
 
-Learn what a page says, as text. Use it when the built-in reader fails (403, 429,
-timeout, too large), returns a verification or login page, or gives a summary where
-you need the exact text (quotes, numbers, tables, a full paper).
-Targets: URLs, DOIs (10.1145/... or doi:...), arXiv IDs (arXiv:2403.01092 -> abstract page).
-PDFs come back as extracted text with '<!-- page N -->' markers; --pdf reads the PDF a
-paper page links instead of the page. A verification page is never returned as
-content: it is exit 6 (needs a person) or 8 (blocked).
+Learn what a web page says, as Markdown. Use it when the built-in reader fails (403,
+429, timeout, too large), returns a verification or login page, or gives a summary
+where you need the exact text (quotes, numbers, tables).
+Targets: URLs, DOIs (10.1145/... or doi:... -> the paper's page), arXiv IDs
+(arXiv:2403.01092 -> abstract page). Links are [text][N], their URLs listed at the end
+as '[N]: URL'. A PDF or other file is not a page (error not_a_page): `webkit download`
+it. A verification page is never returned as content: it is exit 6 (needs a person)
+or 8 (blocked).
 Output: a page that fits --max-chars is printed; a longer one is saved to a file and
-only a preview and the path are printed. With -o, only paths are printed.
+only its size, first paragraph and outline (line numbers of its headings) are printed.
+With -o, only paths are printed.
 
 positional arguments:
   TARGET
@@ -73,10 +75,9 @@ options:
   --max-chars N         most characters this command prints (default 4000, at
                         most 20000); longer text goes to a file and its path
                         is printed
-  --pdf                 read the paper PDF the page links (citation_pdf_url)
   -f, --format {fit,md,html,links,json}
                         fit = main content (default), md = full page, html,
-                        links, json
+                        links (N, URL, text), json
   -o, --output PATH     save to FILE (one target) or DIR; prints one line per
                         page
   --wait-for CSS|MS     CSS selector to wait for, or milliseconds
@@ -97,10 +98,12 @@ usage: webkit download [-h] [--url URL] [--timeout TIMEOUT] [--json]
                        [--wait-timeout WAIT_TIMEOUT]
                        TARGET
 
-Get the file itself (PDF, archive, dataset), saved to disk through the backend
-browser, so its logins and cookies apply. Prints the saved path, not the content.
-Targets: URLs, DOIs, arXiv IDs. A paper page resolves to the PDF it links; any other
-web page is an error (not_a_file): use `read` for text.
+Get the file itself (PDF, archive, dataset), saved to disk as it is. Prints the saved
+path, not the content: open the file with your own tools. Local mode fetches it
+directly, without browser cookies (paywalled PDFs fail: prefer open copies).
+Targets: URLs, DOIs, arXiv IDs. A paper page resolves to the PDF it links (arXiv, the
+DOI's open-access copy, citation_pdf_url); any other web page is an error
+(not_a_file): use `read` for text.
 Default destination: ~/.cache/web-kit/downloads/ ($WEBKIT_DOWNLOAD_DIR).
 
 positional arguments:

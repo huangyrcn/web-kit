@@ -7,7 +7,7 @@ AI Agent 上网的兜底通道：Agent 内置的网页工具失败、被拦、�
 ```
  Agent ──► webkit CLI ──► opencli 站点适配、`opencli web read` ──► OpenCLI 插件 ──► 你的 Chrome
              │             （搜索引擎、网页转 Markdown）                          （你的登录状态、你的 IP）
-             └─► urllib + pdftotext（PDF 和文件直接下载）
+             └─► urllib（download：PDF 和其他文件直接下载，原样保存）
 ```
 
 `webkit` 保持 Agent 依赖的约定：只读命令、告诉 Agent 下一步怎么做的退出码、逐个引擎汇报结果、回退链、有上限的输出，验证页永远不会当成正文返回。它只调用 opencli 的**只读**命令，而且只走适配这条路（先在空白页附着、复用常驻标签页、从不在页面里执行脚本）。服务器后端仍然可以用：`backend = "remote"`（见下文"远端模式"）。
@@ -24,8 +24,8 @@ AI Agent 上网的兜底通道：Agent 内置的网页工具失败、被拦、�
 | 命令 | 输入 | 输出 | 用途 |
 |---|---|---|---|
 | `webkit search` | 查询词 | 链接和摘要列表，不是答案 | 找网址（不占 WebSearch 额度；可用 Scholar、Semantic Scholar、arXiv） |
-| `webkit read` | 网址、DOI、`arXiv:ID` | 网页或 PDF 的文本 | 了解内容写了什么（`--pdf`：读论文页对应的 PDF） |
-| `webkit download` | 网址、DOI、`arXiv:ID` | 存到本地的文件（只打印路径） | 保存或交付文件；论文页会自动解析到它的 PDF |
+| `webkit read` | 网址、DOI、`arXiv:ID` | 网页的 Markdown（链接写成 `[文字][N]`，地址列在末尾） | 了解网页写了什么；长页面只打印目录，全文存成文件 |
+| `webkit download` | 网址、DOI、`arXiv:ID` | 存到本地的文件（只打印路径） | 获取文件（PDF 也走这里）；论文页会自动解析到它的 PDF；文件内容由 Agent 用自己的工具读 |
 
 不适用：内置工具已经能做好的事、大批量检索、点击或填表。这台机器上的所有 Agent 共用你的 Chrome 和你的 IP，并发用得多会让你自己的账号更容易遇到验证码。
 
@@ -43,21 +43,19 @@ webkit skill install --agent codex   # 生成 ~/.codex/skills/web-kit/（SKILL.m
 ```
 
 ```bash
-webkit search "query"                          # 通用：google > duckduckgo > bing
-webkit search -p academic --time year "query"  # semantic_scholar > google_scholar > openalex > arxiv
+webkit search "query"                          # 通用：google > brave
+webkit search -p academic "query"              # semantic_scholar > google_scholar > openalex > arxiv
 webkit search --read 3 -o out/ "query"         # 搜索后保存前 3 条结果的正文
-webkit read https://arxiv.org/pdf/1706.03762   # PDF 直接返回文字
-webkit read --pdf -o paper.md 10.1145/3774904.3792101   # DOI -> 论文页 -> 它的 PDF，返回文字
-webkit crawl https://docs.example.com -o docs/ --max-pages 10
+webkit read https://example.org/post           # 短页面直接打印；长页面打印目录并存成文件
 webkit download https://example.com/paper.pdf  # 默认存到 ~/.cache/web-kit/downloads/
 webkit download arXiv:2403.01092               # 论文页或 DOI 会解析到它的 PDF
-webkit status                                  # 浏览器、出网、各引擎健康状况
+webkit status                                  # opencli、Chrome 插件、web-kit 插件
 ```
 
-`search` 输出的第一行汇报各引擎结果，例如 `# engines google=error:network duckduckgo=ok:8 bing=skipped`。
+`search` 输出的第一行汇报各引擎结果，例如 `# engines google=error:network brave=ok:8`。
 退出码：0 成功 · 1 用法错误 · 2 无结果 · 3 失败（最多重试一次）· 4 认证 · 5 后端不可达 · 6 需要人工处理（验证码或登录，不要重试）· 7 忙（稍后重试）· 8 被封锁（网站拒绝这台服务器，不要重试，换来源）。错误以一行 JSON 输出到标准错误，其中的 `hint` 说明下一步怎么做。
 
-输出有总量预算，正文不会大量涌入 agent 的上下文：每条命令的标准输出和标准错误合计最多 `--max-chars` 个字符（默认 4000，上限 20000）。较长的页面保存到 `~/.cache/web-kit/pages/`，只打印预览和文件路径；用了 `-o` 就只打印路径；其余放不下的内容（长列表、大量错误）写入一个文件，最后一行给出路径；`--json` 只改变格式，不改变输出量。
+输出有总量预算，正文不会大量涌入 agent 的上下文：每条命令的标准输出和标准错误合计最多 `--max-chars` 个字符（默认 4000，上限 20000）。较长的页面保存到 `~/.cache/web-kit/pages/`，只打印大小、路径、第一段和目录（各标题所在的行号）；用了 `-o` 就只打印路径；其余放不下的内容（长列表、大量错误）写入一个文件，最后一行给出路径；`--json` 只改变格式，不改变输出量。
 
 分工：**opencli** 负责"网站"（每个站点一个适配：网址、页面结构、字段）；**webkit** 负责"Agent"（命令、引擎顺序、统一的结果格式、错误分类和退出码、输出量控制、PDF）。opencli 没有适配的站点，在本仓库的 `opencli-plugin/` 里写一个（站点名不和官方重名；上游有了官方适配就删掉我们的），再在 webkit 的引擎表里加一行。
 

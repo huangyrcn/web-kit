@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 
 import pytest
@@ -135,10 +134,23 @@ def test_read_returns_markdown_without_opencli_header(opencli):
     answers["web read"] = (0, WEB.format(url="https://e.org/final", body="Hello [a](https://e.org/a) [b](https://x.org/b)"), "")
     out = local.page(CFG, {"url": "https://e.org/", "format": "fit", "wait_for": ".row"})
     assert out == {"url": "https://e.org/", "final_url": "https://e.org/final", "title": "Title", "kind": "html",
-                   "format": "fit", "content": "Hello [a](https://e.org/a) [b](https://x.org/b)"}
+                   "format": "fit", "content": "Hello [a][1] [b][2]\n\n[1]: https://e.org/a\n[2]: https://x.org/b"}
     assert calls[-1][-2:] == ["--wait-for", ".row"] and "--download-images" in calls[-1]
     links = local.page(CFG, {"url": "https://e.org/", "format": "links"})["links"]
-    assert [(l["href"], l["scope"]) for l in links] == [("https://e.org/a", "internal"), ("https://x.org/b", "external")]
+    assert [(l["n"], l["href"], l["text"], l["scope"]) for l in links] == [
+        (1, "https://e.org/a", "a", "internal"), (2, "https://x.org/b", "b", "external")]
+
+
+def test_links_become_numbered_references():
+    md = ('See [a](https://e.org/a), [![logo](https://i.org/x.png)](https://e.org/a) and '
+          '[w](https://w.org/A_\\(b\\) "title") [rel](/p) `[c](https://code)`\n\n'
+          '```\n[d](https://fence)\n```')
+    body, links = local.reference_links(md, "https://e.org/base")
+    assert body == ('See [a][1], [![logo][2]][1] and [w][3] [rel][4] `[c](https://code)`\n\n'
+                    '```\n[d](https://fence)\n```\n\n'
+                    '[1]: https://e.org/a\n[2]: https://i.org/x.png\n[3]: https://w.org/A_(b)\n[4]: https://e.org/p')
+    assert [l["text"] for l in links] == ["a", "logo", "w", "rel"]  # one entry per URL, its first text
+    assert local.reference_links("no links here") == ("no links here", [])
 
 
 def test_read_refuses_wall_pages_and_empty_pages(opencli):
@@ -163,25 +175,6 @@ def test_read_html_format_is_not_available_locally(opencli):
     assert e.value.exit_code == 1
 
 
-def _tiny_pdf(text: str) -> bytes:
-    stream = f"BT /F1 12 Tf 72 720 Td ({text}) Tj ET".encode()
-    objs = [b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
-            b"/Resources << /Font << /F1 5 0 R >> >> >>",
-            b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"\nendstream",
-            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"]
-    out, offsets = bytearray(b"%PDF-1.4\n"), []
-    for i, body in enumerate(objs, 1):
-        offsets.append(len(out))
-        out += b"%d 0 obj\n" % i + body + b"\nendobj\n"
-    xref = len(out)
-    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
-    for off in offsets:
-        out += b"%010d 00000 n \n" % off
-    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, xref)
-    return bytes(out)
-
-
 @pytest.fixture
 def web(monkeypatch):
     """Fake plain HTTP: url -> (content type, body)."""
@@ -197,14 +190,24 @@ def web(monkeypatch):
     return pages
 
 
-@pytest.mark.skipif(not shutil.which("pdftotext"), reason="needs pdftotext")
-def test_pdfs_are_fetched_directly_and_turned_into_text(opencli, web):
-    web["https://arxiv.org/pdf/1810.00826"] = ("application/pdf", _tiny_pdf("Hello web-kit"))
-    out = local.page(CFG, {"url": "https://arxiv.org/pdf/1810.00826"})
-    assert out["kind"] == "pdf" and out["pages"] == 1 and "<!-- page 1 -->" in out["content"]
-    assert "Hello web-kit" in out["content"]
-    pdf_page = local.page(CFG, {"url": "https://arxiv.org/abs/1810.00826", "pdf": True})
-    assert pdf_page["pdf_url"] == "https://arxiv.org/pdf/1810.00826"
+def test_read_is_for_web_pages_and_sends_files_to_download(opencli, monkeypatch):
+    answers, calls = opencli
+    with pytest.raises(ApiError) as e:
+        local.page(CFG, {"url": "https://arxiv.org/pdf/1810.00826"})
+    assert e.value.error == "not_a_page" and "webkit download" in e.value.body["hint"] and not calls
+    # a URL that does not look like a file, but Chrome shows one in a viewer opencli cannot read
+    answers["web read"] = fail("attach_failed", "Cannot access a chrome-extension:// URL of different extension")
+    monkeypatch.setattr(local, "_sniff", lambda url: "application/pdf")
+    with pytest.raises(ApiError) as e:
+        local.page(CFG, {"url": "https://repo.org/download?id=7"})
+    assert e.value.error == "not_a_page" and "a PDF" in e.value.message
+    monkeypatch.setattr(local, "_sniff", lambda url: "text/html")  # a real page with an extension conflict
+    with pytest.raises(ApiError) as e:
+        local.page(CFG, {"url": "https://repo.org/page"})
+    assert e.value.error == "browser_conflict"
+    with pytest.raises(ApiError) as e:
+        local.page(CFG, {"url": "https://arxiv.org/abs/1810.00826", "pdf": True})
+    assert e.value.exit_code == 1 and "download" in e.value.body["hint"]
 
 
 def test_pdf_behind_a_doi_or_a_paper_page(opencli, web):
@@ -221,7 +224,7 @@ def test_pdf_behind_a_doi_or_a_paper_page(opencli, web):
 def test_a_non_pdf_answer_is_not_a_file(opencli, web):
     web["https://pub.org/x.pdf"] = ("text/html", b"<html>login</html>")
     with pytest.raises(ApiError) as e:
-        local.page(CFG, {"url": "https://pub.org/x.pdf"})
+        local.download(CFG, {"url": "https://pub.org/x.pdf"})
     assert e.value.error == "not_a_file"
 
 

@@ -5,8 +5,10 @@ here returns the same shape as the backend's /v2 API, so cli.py prints it the sa
 Only opencli *read* commands run (the ENGINES table, `web read`, `openalex work`), and
 only as opencli adapters: they attach to a blank tab before navigating, never use a
 visible tab group, and reuse warm tabs (OPENCLI_SITE_SLOTS). No page script is
-evaluated. PDFs are fetched directly (urllib, no cookies) and turned into text with
-pdftotext.
+evaluated. `read` is for web pages: their Markdown comes back with reference-style
+links ([text][N] in the text, the URLs listed at the end). Files (PDFs and others) are
+`download`'s job: fetched directly (urllib, no cookies) and saved as they are; what a
+file says is for the agent to open with its own tools.
 """
 
 from __future__ import annotations
@@ -17,7 +19,6 @@ import os
 import re
 import shutil
 import subprocess
-import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -32,7 +33,6 @@ OPENCLI_TIMEOUT = 120
 # Warm tabs opencli keeps per site and reuses, instead of a tab (and window) per call.
 SITE_SLOTS = "web:2,google:1,google-scholar:1,brave:1,dblp:1,biorxiv:1,medrxiv:1"
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/158.0.0.0 Safari/537.36"
-PDF_MAX_BYTES = 60 * 1024 * 1024
 WALL_TEXT_LIMIT = 4000  # longer pages are content, whatever words they contain
 
 # Interstitials and refusals, as in the backend (backend/app/webkit_api/download.py).
@@ -177,6 +177,46 @@ def split_header(md: str, url: str) -> tuple[str, str, str]:
     if title in ("untitled", "Untitled"):
         title = ""
     return title, final, body.strip("\n")
+
+
+# Inline Markdown links -> reference-style: the text keeps [text][N], each URL is listed
+# once at the end as "[N]: URL". Link text may hold one level of brackets (an image in a
+# link); URLs come with ( ) escaped by Turndown. Code blocks and code spans stay as they are.
+_TEXT = r"(?:[^\[\]\\]|\\.|\[(?:[^\[\]\\]|\\.)*\])*"
+_DEST = r"(?:[^()\s\\]|\\.|\((?:[^()\s\\]|\\.)*\))+"
+_INLINE_LINK = re.compile(r"(!?)\[(" + _TEXT + r")\]\((" + _DEST + r")(?:\s+\"(?:[^\"\\]|\\.)*\")?\)")
+_CODE = re.compile(r"(^```.*?^```[^\n]*$|^~~~.*?^~~~[^\n]*$|`[^`\n]+`)", re.M | re.S)
+_REF_MARK = re.compile(r"(!?)\[(" + _TEXT + r")\]\[\d+\]")
+
+
+def plain_text(md: str) -> str:
+    """Markdown inline text without its link markers and escapes, on one line."""
+    for _ in range(2):  # an image inside a link
+        md = _REF_MARK.sub(lambda m: m.group(2), _INLINE_LINK.sub(lambda m: m.group(2), md))
+    return " ".join(re.sub(r"\\([\\`*_{}\[\]()#+\-.!|>~])", r"\1", md).split())
+
+
+def reference_links(md: str, base: str = "") -> tuple[str, list[dict]]:
+    """(text with [text][N] links and the '[N]: URL' list at the end, one entry per URL
+    in order of first use: {"n", "href", "text"})."""
+    refs: dict[str, dict] = {}
+
+    def number(m: re.Match) -> str:
+        text = _INLINE_LINK.sub(number, m.group(2))  # inner links first
+        href = re.sub(r"\\([()])", r"\1", m.group(3))
+        if base and not urlparse(href).scheme and not href.startswith("#"):
+            href = urljoin(base, href)
+        ref = refs.setdefault(href, {"n": len(refs) + 1, "href": href, "text": ""})
+        if not ref["text"]:
+            ref["text"] = plain_text(text)[:120]
+        return f"{m.group(1)}[{text}][{ref['n']}]"
+
+    parts = _CODE.split(md)
+    body = "".join(part if i % 2 else _INLINE_LINK.sub(number, part) for i, part in enumerate(parts))
+    links = list(refs.values())
+    if links:
+        body = body.rstrip("\n") + "\n\n" + "\n".join(f"[{r['n']}]: {r['href']}" for r in links)
+    return body, links
 
 
 # ─── search ────────────────────────────────────────────────────────────────────
@@ -425,25 +465,6 @@ def fetch(url: str, max_bytes: int, accept: str = "*/*") -> tuple[str, str, byte
         raise err("network", f"cannot reach {url}: {e.reason}") from None
 
 
-def pdf_to_text(data: bytes) -> tuple[str, str, int]:
-    """(title, text with '<!-- page N -->' markers, pages) via pdftotext."""
-    exe = shutil.which("pdftotext")
-    if not exe:
-        raise err("internal", "pdftotext is not installed", hint="sudo apt install poppler-utils")
-    with tempfile.NamedTemporaryFile(suffix=".pdf") as f:
-        f.write(data)
-        f.flush()
-        p = subprocess.run([exe, "-enc", "UTF-8", f.name, "-"], capture_output=True, timeout=120)
-    if p.returncode != 0:
-        raise err("unexpected_page", f"pdftotext failed: {p.stderr.decode('utf-8', 'replace').strip()[:200]}")
-    pages = p.stdout.decode("utf-8", "replace").split("\f")
-    if pages and not pages[-1].strip():
-        pages.pop()
-    text = "\n\n".join(f"<!-- page {i} -->\n{pg.strip()}" for i, pg in enumerate(pages, 1))
-    title = next((ln.strip() for pg in pages for ln in pg.splitlines() if ln.strip()), "")
-    return title[:200], text, len(pages)
-
-
 def resolve_pdf(cfg, url: str) -> str | None:
     """The PDF behind a paper page, DOI or arXiv abstract, found without a browser."""
     if looks_pdf(url):
@@ -470,26 +491,26 @@ def resolve_pdf(cfg, url: str) -> str | None:
     return urljoin(final, m.group(1)) if m else None
 
 
-def read_pdf(url: str, pdf_url: str, fmt: str) -> dict:
-    final, ctype, data, _ = fetch(pdf_url, PDF_MAX_BYTES, "application/pdf,*/*")
-    if not data.startswith(b"%PDF-"):
-        raise err("not_a_file", f"{pdf_url} did not return a PDF ({ctype or 'unknown type'})", url=url,
-                  hint="the publisher may need a login (not supported locally yet); read the page itself instead")
-    title, text, pages = pdf_to_text(data)
-    out = {"url": url, "final_url": final, "title": title, "kind": "pdf", "format": fmt, "pages": pages}
-    if pdf_url != url:
-        out["pdf_url"] = pdf_url
-    if fmt == "links":
-        out["links"] = []
-    else:
-        out["content"] = text
-    return out
+def _sniff(url: str) -> str:
+    """The content type a URL answers with (first bytes only), '' when unknown."""
+    req = urllib.request.Request(url, headers={"User-Agent": UA, "Range": "bytes=0-1023"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            head = r.read(1024)
+            ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+    except (urllib.error.URLError, OSError, ValueError):
+        return ""
+    return "application/pdf" if head.startswith(b"%PDF-") else ctype
+
+
+def _not_a_page(url: str, ctype: str) -> ApiError:
+    what = "a PDF" if "pdf" in ctype else f"a file ({ctype})"
+    return err("not_a_page", f"{url} is {what}, not a web page", url=url,
+               hint="`webkit download` saves the file (a DOI or paper page: its PDF); then open it with your own "
+                    "tools (your file reader, pdftotext, ...)")
 
 
 # ─── /v2/page and /v2/download equivalents ─────────────────────────────────────
-
-_MD_LINK = re.compile(r"\[([^\]]*)\]\((https?://[^)\s]+)\)")
-
 
 def page(cfg, body: dict) -> dict:
     url, fmt = str(body.get("url") or ""), body.get("format") or "fit"
@@ -498,29 +519,36 @@ def page(cfg, body: dict) -> dict:
     if fmt == "html":
         raise err("invalid_request", "-f html is not available in local mode", hint="use -f md (the page as Markdown)")
     if body.get("pdf"):
-        pdf_url = resolve_pdf(cfg, url)
-        if not pdf_url:
-            raise err("not_found", "found no PDF for this page (no arXiv/DOI open-access copy, no citation_pdf_url)",
-                      url=url, hint="read the page itself (without --pdf)")
-        return read_pdf(url, pdf_url, fmt)
+        raise err("invalid_request", "read --pdf was removed: read is for web pages",
+                  hint="`webkit download TARGET` saves the paper's PDF; open it with your own tools")
     if looks_pdf(url):
-        return read_pdf(url, url, fmt)
+        raise _not_a_page(url, "application/pdf")
     wait_for = body.get("wait_for")
     timeout = float(body.get("timeout") or 60) + 30
-    if wait_for and str(wait_for).isdigit():
-        title, final, text = web_read(cfg, url, wait=max(1, round(int(wait_for) / 1000)), timeout=timeout)
-    else:
-        title, final, text = web_read(cfg, url, wait_for=(wait_for or "").removeprefix("css:") or None, timeout=timeout)
+    try:
+        if wait_for and str(wait_for).isdigit():
+            title, final, text = web_read(cfg, url, wait=max(1, round(int(wait_for) / 1000)), timeout=timeout)
+        else:
+            title, final, text = web_read(cfg, url, wait_for=(wait_for or "").removeprefix("css:") or None,
+                                          timeout=timeout)
+    except ApiError as e:  # Chrome shows files in viewers the extension cannot read (its PDF viewer)
+        if e.error in ("browser_conflict", "unexpected_page", "upstream_http"):
+            ctype = _sniff(url)
+            if ctype and "html" not in ctype:
+                raise _not_a_page(url, ctype) from None
+        raise
     wall = _wall_error(url, "read", title + "\n" + text)
     if wall:
         raise wall
     if not text.strip():
         raise err("unexpected_page", f"the page rendered no text at {url[:120]}",
                   hint="it may load its content late: retry with --wait-for CSS (or milliseconds)")
+    text, links = reference_links(text, final)
     out = {"url": url, "final_url": final, "title": title, "kind": "html", "format": fmt}
     if fmt == "links":
-        out["links"] = [{"href": h, "text": t.strip(), "scope": "internal" if urlparse(h).netloc == urlparse(final).netloc
-                         else "external"} for t, h in _MD_LINK.findall(text)]
+        host = urlparse(final).netloc
+        out["links"] = [{**r, "scope": "internal" if urlparse(r["href"]).netloc == host else "external"}
+                        for r in links]
     elif fmt == "json":
         out["content"] = text
         out["metadata"] = {"title": title}
@@ -577,7 +605,7 @@ def download(cfg, params: dict) -> Download:
 
 def status(cfg) -> dict:
     out = {"mode": "local", "webkit": __version__, "api": API_VERSION, "opencli": None, "extension_connected": False,
-           "profiles": [], "profile": cfg.profile or None, "pdftotext": bool(shutil.which("pdftotext")),
+           "profiles": [], "profile": cfg.profile or None,
            "s2_api_key": bool(cfg.s2_api_key), "error": None}
     try:
         code, stdout, _ = _run_opencli(cfg, ["--version"], 20, profile=False)

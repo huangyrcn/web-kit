@@ -10,7 +10,7 @@ CLI (`webkit`); it drives that Chrome through [opencli](https://github.com/jackw
 ```
  agent ──► webkit CLI ──► opencli adapters, `opencli web read` ──► OpenCLI extension ──► your Chrome
              │             (search engines, pages as Markdown)                         (your logins, your IP)
-             └─► urllib + pdftotext   (PDFs and files, fetched directly)
+             └─► urllib   (download: PDFs and files, fetched directly, saved as they are)
 ```
 
 `webkit` keeps the contract agents rely on: read-only commands, exit codes that
@@ -35,8 +35,8 @@ takes over when:
 | Command | Input | Output | Use it to |
 |---|---|---|---|
 | `webkit search` | a query | ranked links + snippets, no answer | find URLs (no WebSearch quota; Scholar / Semantic Scholar / arXiv) |
-| `webkit read` | URL, DOI, `arXiv:ID` | the page's or PDF's text | learn what it says (`--pdf`: the PDF a paper page links) |
-| `webkit download` | URL, DOI, `arXiv:ID` | the file on disk (path printed) | keep or hand over the file; a paper page resolves to its PDF |
+| `webkit read` | URL, DOI, `arXiv:ID` | a web page as Markdown (links as `[text][N]`, URLs listed at the end) | learn what a page says; a long page prints its outline and is saved to a file |
+| `webkit download` | URL, DOI, `arXiv:ID` | the file on disk (path printed) | get a file (a PDF too); a paper page resolves to its PDF; what the file says is for the agent's own tools |
 
 Not for: anything the built-in tools already did fine, bulk discovery, clicking or
 filling forms. Your Chrome and your IP serve every agent on the machine: heavy
@@ -56,19 +56,17 @@ webkit skill install --agent codex   # ~/.codex/skills/web-kit/ (SKILL.md + refe
 ```
 
 ```bash
-webkit search "query"                          # general: google > duckduckgo > bing
-webkit search -p academic --time year "query"  # semantic_scholar > google_scholar > openalex > arxiv
+webkit search "query"                          # general: google > brave
+webkit search -p academic "query"              # semantic_scholar > google_scholar > openalex > arxiv
 webkit search --read 3 -o out/ "query"         # search, then save the top 3 pages
-webkit read https://arxiv.org/pdf/1706.03762   # PDFs come back as text
-webkit read --pdf -o paper.md 10.1145/3774904.3792101   # DOI -> paper page -> its PDF, as text
-webkit crawl https://docs.example.com -o docs/ --max-pages 10
+webkit read https://example.org/post           # short page: printed; long: outline + saved file
 webkit download https://example.com/paper.pdf  # -> ~/.cache/web-kit/downloads/
 webkit download arXiv:2403.01092               # a paper page or DOI resolves to its PDF
-webkit status                                  # browser, egress, per-engine health
+webkit status                                  # opencli, the Chrome extension, the plugin
 ```
 
 The first line of `search` output reports each engine:
-`# engines google=error:network duckduckgo=ok:8 bing=skipped`.
+`# engines google=error:network brave=ok:8`.
 Exit codes: 0 ok · 1 usage · 2 no results · 3 failed (retry once at most) · 4 auth ·
 5 unreachable · 6 a person is needed (CAPTCHA/login; don't retry) · 7 busy (retry
 later) · 8 blocked (the site refuses this server; don't retry, use another source).
@@ -76,8 +74,8 @@ Errors are one JSON line on stderr whose `hint` says what to do next.
 
 Output is budgeted so page text cannot flood an agent's context: each command prints at
 most `--max-chars` characters in total, stdout and stderr together (default 4000, at most
-20000). A longer page is saved to `~/.cache/web-kit/pages/` and only a preview plus its
-path is printed; with `-o` only paths are printed; whatever else does not fit (long lists,
+20000). A longer page is saved to `~/.cache/web-kit/pages/` and only its size, path, first
+paragraph and outline (the line number of each heading) are printed; with `-o` only paths are printed; whatever else does not fit (long lists,
 many errors) goes to one file named in the last line; `--json` changes the format, never
 the amount.
 
