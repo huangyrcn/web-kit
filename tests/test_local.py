@@ -111,7 +111,6 @@ def test_opencli_failures_map_to_webkit_classes(opencli, reply, cls):
 def test_every_engine_failing_is_one_error_with_a_hint(opencli):
     answers, _ = opencli
     answers["google search"] = fail("BROWSER_CONNECT", "x", 69)
-    answers["brave search"] = fail("BROWSER_CONNECT", "x", 69)
     with pytest.raises(ApiError) as e:
         local.search(CFG, {"q": "x"})
     assert e.value.error == "engines_failed" and "open Chrome" in e.value.body["hint"]
@@ -277,7 +276,7 @@ def test_cli_runs_locally_by_default(opencli, monkeypatch, tmp_path, capsys):
     answers["google search"] = ok([{"type": "result", "title": "A", "url": "https://a", "snippet": "s"}])
     with pytest.raises(SystemExit) as e:
         cli.main(["search", "x"])
-    assert e.value.code == 0 and capsys.readouterr().out.splitlines()[0] == "# engines google=ok:1 brave=skipped"
+    assert e.value.code == 0 and capsys.readouterr().out.splitlines()[0] == "# engines google=ok:1"
     with pytest.raises(SystemExit) as e:
         cli.main(["crawl", "https://e.org"])
     assert e.value.code == 1

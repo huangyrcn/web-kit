@@ -1,5 +1,5 @@
-"""webkit — fallback web access for agents, through a real, logged-in Chrome on a
-server (web-kit v2 backend).
+"""webkit — fallback web access for agents, through a real Chrome driven by opencli:
+this machine's (backend = "local", the default) or a web-kit server's (backend = "remote").
 
 Output is compact text for agents and humans; --json changes the format, never the
 amount. Every command prints at most --max-chars characters (default 4000): a longer
@@ -37,7 +37,7 @@ from .local import LocalClient, plain_text
 
 PROFILES = ("general", "academic", "community")
 TIME_RANGES = ("day", "week", "month", "year")
-DEFAULT_BUDGET = 4000   # chars a content command prints (search / read / crawl / download)
+DEFAULT_BUDGET = 4000   # chars a content command prints (search / read / download)
 MAX_BUDGET = 20000      # hard ceiling for --max-chars; full text only ever goes to files
 DIAG_BUDGET = 20000     # status / doctor / engines
 NOTE_RESERVE = 300      # room kept for each "saved to ..." line
@@ -430,35 +430,6 @@ def cmd_read(args, client: Client) -> int:
     return code
 
 
-def cmd_crawl(args, client: Client) -> int:
-    body = {"url": args.url, "strategy": args.strategy, "max_depth": args.max_depth,
-            "max_pages": args.max_pages, "include": args.include or [], "exclude": args.exclude or [],
-            "format": args.format, "timeout": args.timeout or 180}
-    data = client.post_json("/v2/crawl", body, timeout=body["timeout"] + 60)
-    outdir = Path(args.output)
-    outdir.mkdir(parents=True, exist_ok=True)
-    index = []
-    for i, page in enumerate(data.get("pages", []), 1):
-        entry = {k: page.get(k) for k in ("url", "depth", "title")}
-        if "content" in page:
-            name = f"{i:02d}-{slugify(page.get('title') or urlparse(page['url']).path.rsplit('/', 1)[-1] or 'index')}.md"
-            (outdir / name).write_text(page["content"], encoding="utf-8")
-            entry.update(file=name, chars=len(page["content"]))
-        else:
-            entry.update(error=page.get("error"), message=page.get("message"))
-        index.append(entry)
-    (outdir / "index.json").write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
-    if args.json:
-        print_json({"url": data.get("url"), "count": data.get("count", 0), "dir": str(outdir), "pages": index},
-                   summary={"count": data.get("count", 0), "dir": str(outdir)})
-    else:
-        for e in index:
-            out(f"saved {outdir / e['file']} ({e['chars']} chars) {e['url']}" if "file" in e
-                else f"failed {e['url']}: {e.get('error')}")
-        out(f"# crawled {data.get('count', 0)} pages -> {outdir}/index.json")
-    return EXIT_OK if any("file" in e for e in index) else EXIT_FAILED
-
-
 def _download_once(client: Client, url: str, dest: Path | None, max_mb: int, allow_html: bool = False,
                    as_json: bool = False) -> Path:
     resp = client.stream("/v2/download", {"url": url, "max_mb": max_mb or None, "allow_html": allow_html},
@@ -538,48 +509,17 @@ def _open_for_human(client: Client, url: str) -> None:
 
 def cmd_status(args, client: Client) -> int:
     data = client.get_json("/v2/status", timeout=args.timeout or 30)
-    if getattr(client, "local", False):
-        ok = bool(data.get("opencli") and data.get("extension_connected"))
-        if args.json:
-            print_json(data)
-        else:
-            out(f"web-kit {data.get('webkit')} (api {data.get('api')}), local mode: this machine's Chrome via opencli")
-            for _, line in _local_lines(data):
-                out(line)
-        return EXIT_OK if ok else EXIT_FAILED
+    ok = bool(data.get("opencli") and data.get("extension_connected"))
     if args.json:
         print_json(data)
-        return EXIT_OK if data.get("ok") else EXIT_FAILED
-    v, b = data.get("version", {}), data.get("browser", {})
-    out(f"web-kit {v.get('webkit')} (api {v.get('api')}, image {v.get('image')}, chrome {v.get('chrome')}, "
-        f"searxng {str(v.get('searxng_ref'))[:7]})")
-    out(f"browser: {'connected' if b.get('connected') else 'DISCONNECTED'}, pages {b.get('pages_in_use')}/"
-        f"{b.get('max_pages')} in use, {b.get('waiting')} waiting")
-    egress = data.get("egress", {})
-    down = data.get("egress_down", [])
-    if not egress:
-        out("egress: not probed yet")
-    elif down:
-        out("egress: DOWN " + ", ".join(f"{h} ({egress[h].get('error')})" for h in down)
-            + f"; ok {len(egress) - len(down)}/{len(egress)}")
     else:
-        out(f"egress: ok ({len(egress)}/{len(egress)} hosts)")
-    engines = data.get("engines", {})
-    if engines:
-        out("engines (since backend start):")
-        for name, st in engines.items():
-            line = f"  {name}: {st['state']} ({st['errors']}/{st['calls']} errors)"
-            if st.get("last_error") and st["state"] != "ok":
-                le = st["last_error"]
-                line += f", last error {le['class']} at {le['at']}"
+        where = ("local mode: this machine's Chrome via opencli" if getattr(client, "local", False) else
+                 f"server {client.cfg.url}: Chrome {data.get('chrome') or '?'} via opencli"
+                 + (f", image {data['image']}" if data.get("image") else ""))
+        out(f"web-kit {data.get('webkit')} (api {data.get('api')}), {where}")
+        for _, line in _local_lines(data):
             out(line)
-    sx = data.get("searxng", {})
-    line = f"searxng: {'healthy' if sx.get('healthy') else 'UNHEALTHY'}"
-    if sx.get("engine_errors"):
-        line += "; api engine errors: " + ", ".join(
-            f"{k} {v.get('error_rate')}% ({v.get('error')})" for k, v in sx["engine_errors"].items())
-    out(line)
-    return EXIT_OK if data.get("ok") else EXIT_FAILED
+    return EXIT_OK if ok else EXIT_FAILED
 
 
 def _local_lines(st: dict) -> list[tuple[bool, str]]:
@@ -613,7 +553,6 @@ def cmd_engines(args, client: Client) -> int:
 
 def cmd_doctor(args, client: Client) -> int:
     cfg = client.cfg
-    checks: list[tuple[bool, str]] = []
     out(f"config file: {config.config_path()}")
     if getattr(client, "local", False):
         out(f"backend: local  [{cfg.sources.get('backend')}]; opencli: {cfg.opencli or '(from PATH)'}; "
@@ -622,31 +561,28 @@ def cmd_doctor(args, client: Client) -> int:
         for ok, msg in checks:
             out(f"{'✓' if ok else '✗'} {msg}")
         return EXIT_OK if all(ok for ok, _ in checks[:2]) else EXIT_FAILED
-    out(f"url: {cfg.url}  [{cfg.sources.get('url')}]")
-    out(f"api key: {config.mask(cfg.api_key)}  [{cfg.sources.get('api_key')}]")
-    out(f"admin key: {config.mask(cfg.admin_key)}  [{cfg.sources.get('admin_key')}]")
+    out(f"backend: remote  [{cfg.sources.get('backend')}]; url: {cfg.url}  [{cfg.sources.get('url')}]")
+    out(f"api key: {config.mask(cfg.api_key)}  [{cfg.sources.get('api_key')}]; "
+        f"admin key: {config.mask(cfg.admin_key)}  [{cfg.sources.get('admin_key')}]")
+    checks: list[tuple[bool, str]] = []
     code = EXIT_OK
     try:
         v = client.get_json("/v2/version", timeout=15)
-        checks.append((True, f"backend reachable, authenticated: web-kit {v.get('webkit')}"))
-        if v.get("api") != API_VERSION:
-            checks.append((False, f"API version mismatch: backend {v.get('api')}, CLI {API_VERSION}"))
-            code = code or EXIT_FAILED
+        checks.append((True, f"server reachable, key accepted: web-kit {v.get('webkit')}, Chrome {v.get('chrome') or '?'}"))
+        if v.get("api") != API_VERSION or v.get("mode") != "server":
+            checks.append((False, f"not a web-kit server for this CLI (api {v.get('api')}, mode {v.get('mode')}): "
+                                  f"update the server or the CLI"))
+            code = EXIT_FAILED
         elif str(v.get("webkit", "")).split(".")[0] != __version__.split(".")[0]:
-            checks.append((False, f"major version differs: backend {v.get('webkit')}, CLI {__version__}"))
+            checks.append((False, f"major version differs: server {v.get('webkit')}, CLI {__version__}"))
     except ApiError as e:
         checks.append((False, f"{e.error}: {e.message}" + (f" — {e.body.get('hint')}" if e.body.get("hint") else "")))
         code = e.exit_code
     if code == EXIT_OK:
         try:
-            st = client.get_json("/v2/status", timeout=30)
-            b = st.get("browser", {})
-            checks.append((bool(b.get("connected")), "browser connected" if b.get("connected") else "browser DISCONNECTED"))
-            down = st.get("egress_down", [])
-            checks.append((not down, "egress ok" if not down else "egress DOWN: " + ", ".join(down)))
-            bad = [n for n, s in st.get("engines", {}).items() if s.get("state") == "down"]
-            checks.append((not bad, "no engine down" if not bad else "engines down: " + ", ".join(bad)))
-            if not all(ok for ok, _ in checks):
+            server = _local_lines(client.get_json("/v2/status", timeout=30))
+            checks += server
+            if not all(ok for ok, _ in server[:2]):
                 code = EXIT_FAILED
         except ApiError as e:
             checks.append((False, f"status failed: {e.error}: {e.message}"))
@@ -725,7 +661,6 @@ the job; when they work, prefer them.
   search    find URLs: raw result links + snippets, no answer; no WebSearch quota
   read      learn what a web page says: URL / DOI / arXiv:ID -> Markdown text
   download  get a file (PDF, data, ...) saved to disk (a DOI or paper page -> its PDF)
-  crawl     a few pages of one site into a directory
 
   status, doctor, engines, config, skill: health and setup
 
@@ -736,9 +671,9 @@ Order: built-in tools -> search/read/download -> report "not accessible".
 def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     g = common.add_argument_group("connection")
-    g.add_argument("--url", dest="backend_url", metavar="URL", help="backend URL (default: config / $WEBKIT_URL)")
+    g.add_argument("--url", dest="backend_url", metavar="URL", help="web-kit server URL, remote mode (default: config / $WEBKIT_URL)")
     g.add_argument("--key", help=argparse.SUPPRESS)
-    g.add_argument("--timeout", type=int, help="seconds to wait for the backend")
+    g.add_argument("--timeout", type=int, help="seconds to wait for the answer")
     common.add_argument("--json", action="store_true", help="JSON output (same amount, different format)")
     common.add_argument("--max-chars", type=int, metavar="N",
                         help=f"most characters this command prints (default {DEFAULT_BUDGET}, at most "
@@ -758,7 +693,7 @@ Then `webkit read` the results you need.
 First line: '# engines <engine>=<ok:N|empty|error:CLASS|skipped> ...'.""")
     s.add_argument("query", nargs="+")
     s.add_argument("-p", "--profile", choices=PROFILES, default="general",
-                   help="engine chain: general=google>brave, "
+                   help="engine chain: general=google, "
                    "academic=semantic_scholar>google_scholar>openalex>arxiv, "
                    "community=hackernews>stackoverflow (default: general)")
     s.add_argument("-e", "--engine", help="use exactly this engine (see `webkit engines`)")
@@ -809,21 +744,9 @@ Default destination: {_tilde(config.download_dir())}/ ($WEBKIT_DOWNLOAD_DIR)."""
     d.add_argument("--wait-timeout", type=int, default=300, help="seconds to wait with --wait-human (default 300)")
     d.set_defaults(func=cmd_download, default_budget=DEFAULT_BUDGET)
 
-    c = sub.add_parser("crawl", parents=[common], formatter_class=raw, description="""\
-Bounded synchronous crawl of one site: one markdown file per page plus index.json.""")
-    c.add_argument("url")
-    c.add_argument("-o", "--output", required=True, metavar="DIR")
-    c.add_argument("--strategy", choices=("bfs", "dfs"), default="bfs")
-    c.add_argument("--max-depth", type=int, default=2)
-    c.add_argument("--max-pages", type=int, default=10, help="default 10, backend cap 30")
-    c.add_argument("--include", action="append", metavar="GLOB", help="only URLs matching (repeatable)")
-    c.add_argument("--exclude", action="append", metavar="GLOB", help="skip URLs matching (repeatable)")
-    c.add_argument("-f", "--format", choices=("fit", "md"), default="fit")
-    c.set_defaults(func=cmd_crawl, default_budget=DEFAULT_BUDGET)
-
-    st = sub.add_parser("status", parents=[common], description="backend health: browser, egress, engines")
+    st = sub.add_parser("status", parents=[common], description="health: opencli, the Chrome extension, the plugin")
     st.set_defaults(func=cmd_status, default_budget=DIAG_BUDGET)
-    dr = sub.add_parser("doctor", parents=[common], description="check config, keys, versions and backend health")
+    dr = sub.add_parser("doctor", parents=[common], description="check config, keys, versions and health")
     dr.set_defaults(func=cmd_doctor, default_budget=DIAG_BUDGET)
     en = sub.add_parser("engines", parents=[common], description="list engines, profiles and time-filter support")
     en.set_defaults(func=cmd_engines, default_budget=DIAG_BUDGET)

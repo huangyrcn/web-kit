@@ -203,18 +203,24 @@ def test_skill_and_reference(capsys):
     assert skill.startswith("---\nname: web-kit") and "reference.md" in skill and "usage: webkit" not in skill
     assert run("skill", "show", "--reference") == 0
     ref = capsys.readouterr().out
-    for cmd in ("webkit search", "webkit read", "webkit crawl", "webkit download"):
+    for cmd in ("webkit search", "webkit read", "webkit download"):
         assert f"## {cmd}" in ref
+    assert "webkit crawl" not in ref
 
 
 def test_doctor_reports(capsys):
-    ROUTES[("GET", "/v2/version")] = lambda h, q, b: h._send(200, {"webkit": "2.0.0", "api": "v2"})
+    ROUTES[("GET", "/v2/version")] = lambda h, q, b: h._send(200, {"webkit": "2.0.0", "api": "v2", "mode": "server",
+                                                                  "chrome": "158.0.1"})
     ROUTES[("GET", "/v2/status")] = lambda h, q, b: h._send(200, {
-        "ok": False, "browser": {"connected": True}, "egress_down": ["www.google.com"], "engines": {}})
-    ROUTES[("GET", "/v2/admin/ping")] = lambda h, q, b: h._send(200, {"admin": True})
+        "mode": "server", "opencli": "2.0.3", "extension_connected": False, "profiles": [], "plugin": True,
+        "error": "the OpenCLI extension in the server's Chrome is not connected"})
+    ROUTES[("GET", "/v2/admin/ping")] = lambda h, q, b: h._send(200, {"ok": True})
     assert run("doctor") == 3
     out = capsys.readouterr().out
-    assert "✗ egress DOWN: www.google.com" in out and "✓ admin key accepted" in out
+    assert "✓ server reachable, key accepted: web-kit 2.0.0, Chrome 158.0.1" in out
+    assert "✗ browser: OpenCLI extension NOT CONNECTED" in out and "✓ admin key accepted" in out
+    ROUTES[("GET", "/v2/version")] = lambda h, q, b: h._send(200, {"webkit": "2.0.0", "api": "v2"})  # old backend
+    assert run("doctor") == 3 and "not a web-kit server for this CLI" in capsys.readouterr().out
 
 
 def test_download_rejects_empty_file(tmp_path, capsys):
@@ -357,16 +363,6 @@ def test_search_read_json_with_output(tmp_path, capsys):
     o, n = _stdout_len(capsys)
     assert n < cli.DEFAULT_BUDGET and len(json.loads(o)["pages"]) == 3 and "lorem" not in o
     assert all(f.read_text() == BIG for f in (tmp_path / "d").iterdir())
-
-
-def test_crawl_json_saves_files_and_prints_the_index(tmp_path, capsys):
-    ROUTES[("POST", "/v2/crawl")] = lambda h, q, b: h._send(200, {
-        "url": b["url"], "count": 10,
-        "pages": [{"url": f"https://d/{i}", "depth": 1, "title": f"p{i}", "content": BIG} for i in range(10)]})
-    assert run("crawl", "--json", "-o", str(tmp_path / "c"), "https://d/") == 0
-    o, n = _stdout_len(capsys)
-    assert n < cli.DEFAULT_BUDGET and "lorem" not in o and json.loads(o)["count"] == 10
-    assert len(list((tmp_path / "c").glob("*.md"))) == 10
 
 
 def test_many_urls_share_one_budget(tmp_path, capsys):

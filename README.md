@@ -56,7 +56,7 @@ webkit skill install --agent codex   # ~/.codex/skills/web-kit/ (SKILL.md + refe
 ```
 
 ```bash
-webkit search "query"                          # general: google > brave
+webkit search "query"                          # general: google
 webkit search -p academic "query"              # semantic_scholar > google_scholar > openalex > arxiv
 webkit search --read 3 -o out/ "query"         # search, then save the top 3 pages
 webkit read https://example.org/post           # short page: printed; long: outline + saved file
@@ -66,7 +66,7 @@ webkit status                                  # opencli, the Chrome extension, 
 ```
 
 The first line of `search` output reports each engine:
-`# engines google=error:network brave=ok:8`.
+`# engines semantic_scholar=error:busy google_scholar=ok:8 openalex=skipped arxiv=skipped`.
 Exit codes: 0 ok · 1 usage · 2 no results · 3 failed (retry once at most) · 4 auth ·
 5 unreachable · 6 a person is needed (CAPTCHA/login; don't retry) · 7 busy (retry
 later) · 8 blocked (the site refuses this server; don't retry, use another source).

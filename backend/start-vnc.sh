@@ -1,10 +1,9 @@
 #!/bin/bash
-# x11vnc is only reachable through noVNC behind Caddy basic auth; an extra VNC
-# password (WEBKIT_VNC_PASSWORD) is optional defence in depth.
+# The display for a person, on the container's loopback only: noVNC (start-novnc.sh)
+# is the way in, behind the admin key.
 set -e
-if [ -n "${WEBKIT_VNC_PASSWORD:-}" ]; then
-    PWFILE="$(mktemp)"
-    /usr/bin/x11vnc -storepasswd "$WEBKIT_VNC_PASSWORD" "$PWFILE" >/dev/null 2>&1
-    exec /usr/bin/x11vnc -display :99 -forever -rfbauth "$PWFILE" -rfbport 5900 -localhost -shared -quiet
-fi
-exec /usr/bin/x11vnc -display :99 -forever -nopw -rfbport 5900 -localhost -shared -quiet
+for i in $(seq 1 30); do
+    xdpyinfo -display :99 >/dev/null 2>&1 && break
+    sleep 1
+done
+exec /usr/bin/x11vnc -display :99 -forever -shared -nopw -localhost -rfbport 5900 -quiet

@@ -31,7 +31,7 @@ from .client import ApiError
 
 OPENCLI_TIMEOUT = 120
 # Warm tabs opencli keeps per site and reuses, instead of a tab (and window) per call.
-SITE_SLOTS = "web:2,google:1,google-scholar:1,brave:1,dblp:1,biorxiv:1,medrxiv:1"
+SITE_SLOTS = "web:2,google:1,google-scholar:1,dblp:1,biorxiv:1,medrxiv:1"
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/158.0.0.0 Safari/537.36"
 WALL_TEXT_LIMIT = 4000  # longer pages are content, whatever words they contain
 
@@ -296,7 +296,6 @@ class Engine:
 
 ENGINES: dict[str, Engine] = {
     "google": Engine("google search", 100, _google, "https://www.google.com/search?q={q}"),
-    "brave": Engine("brave search", 18, _plain, "https://search.brave.com/search?q={q}"),
     "google_scholar": Engine("google-scholar search", 20, _scholar, "https://scholar.google.com/scholar?q={q}&hl=zh-CN"),
     # S2 answers 429 even with a key, and opencli retries only without one.
     "semantic_scholar": Engine("semanticscholar search", 100, _s2, retries=2),
@@ -316,7 +315,7 @@ ENGINES: dict[str, Engine] = {
     "stackoverflow": Engine("stackoverflow search", 50, _so),
 }
 PROFILES: dict[str, list[str]] = {
-    "general": ["google", "brave"],
+    "general": ["google"],
     "academic": ["semantic_scholar", "google_scholar", "openalex", "arxiv"],
     "community": ["hackernews", "stackoverflow"],
 }

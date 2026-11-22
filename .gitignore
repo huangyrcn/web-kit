@@ -13,7 +13,6 @@ venv/
 *~
 
 # Local overrides — users keep their real settings here, never committed
-backend/searxng-settings/settings.yml
 backend/.env
 .env
 .env.local
@@ -22,7 +21,6 @@ secrets.yml
 # Runtime / probe artifacts
 backend/chrome-profile/
 *.log
-backend/bench/results/
 /tmp/probe.json
 
 # Skill eval workspace

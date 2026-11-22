@@ -43,7 +43,7 @@ webkit skill install --agent codex   # 生成 ~/.codex/skills/web-kit/（SKILL.m
 ```
 
 ```bash
-webkit search "query"                          # 通用：google > brave
+webkit search "query"                          # 通用：google
 webkit search -p academic "query"              # semantic_scholar > google_scholar > openalex > arxiv
 webkit search --read 3 -o out/ "query"         # 搜索后保存前 3 条结果的正文
 webkit read https://example.org/post           # 短页面直接打印；长页面打印目录并存成文件
@@ -52,7 +52,7 @@ webkit download arXiv:2403.01092               # 论文页或 DOI 会解析到�
 webkit status                                  # opencli、Chrome 插件、web-kit 插件
 ```
 
-`search` 输出的第一行汇报各引擎结果，例如 `# engines google=error:network brave=ok:8`。
+`search` 输出的第一行汇报各引擎结果，例如 `# engines semantic_scholar=error:busy google_scholar=ok:8 openalex=skipped arxiv=skipped`。
 退出码：0 成功 · 1 用法错误 · 2 无结果 · 3 失败（最多重试一次）· 4 认证 · 5 后端不可达 · 6 需要人工处理（验证码或登录，不要重试）· 7 忙（稍后重试）· 8 被封锁（网站拒绝这台服务器，不要重试，换来源）。错误以一行 JSON 输出到标准错误，其中的 `hint` 说明下一步怎么做。
 
 输出有总量预算，正文不会大量涌入 agent 的上下文：每条命令的标准输出和标准错误合计最多 `--max-chars` 个字符（默认 4000，上限 20000）。较长的页面保存到 `~/.cache/web-kit/pages/`，只打印大小、路径、第一段和目录（各标题所在的行号）；用了 `-o` 就只打印路径；其余放不下的内容（长列表、大量错误）写入一个文件，最后一行给出路径；`--json` 只改变格式，不改变输出量。

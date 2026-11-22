@@ -1,44 +1,35 @@
-# web-kit v2 backend.
+# web-kit server: Chrome + opencli + webkit-serve + noVNC in one container.
 #
-#   cp .env.example .env   # fill in the secrets
-#   cp searxng-settings/settings.yml.example searxng-settings/settings.yml
-#   docker compose up -d --build
+#   cp backend/.env.example backend/.env && chmod 600 backend/.env   # fill it in
+#   docker compose -f backend/docker-compose.yml up -d --build
 #
-# Several instances can share one host (e.g. a test stack next to production):
-# give each its own project name (-p), WEBKIT_CONTAINER and ports in its .env.
+# Bind the ports to an address only trusted clients reach (e.g. this host's tailnet
+# address), never 0.0.0.0 on a shared network: every request still needs a key.
 services:
   web-kit:
-    image: ${WEBKIT_IMAGE:-web-kit:v2}
+    image: ${WEBKIT_IMAGE:-web-kit:server}
     build:
-      context: .
+      context: ..
+      dockerfile: backend/Dockerfile
       args:
-        IMAGE_TAG: ${WEBKIT_IMAGE:-web-kit:v2}
+        IMAGE_TAG: ${WEBKIT_IMAGE:-web-kit:server}
     container_name: ${WEBKIT_CONTAINER:-web-kit}
     restart: unless-stopped
     shm_size: "1gb"
     mem_limit: ${WEBKIT_MEM_LIMIT:-4g}
     ports:
-      # The API port is the only one clients need. noVNC and CDP are admin-only.
-      - "${WEBKIT_BIND:-127.0.0.1}:${WEBKIT_API_PORT:-8082}:8082"
-      - "${WEBKIT_BIND:-127.0.0.1}:${WEBKIT_VNC_PORT:-6080}:6080"
-      - "${WEBKIT_BIND:-127.0.0.1}:${WEBKIT_CDP_PORT:-9223}:9223"
+      - "${WEBKIT_BIND:?set WEBKIT_BIND in .env}:${WEBKIT_API_PORT:-8082}:8082"   # the API
+      - "${WEBKIT_BIND:?set WEBKIT_BIND in .env}:${WEBKIT_VNC_PORT:-6080}:6080"   # noVNC, for a person
     environment:
       WEBKIT_API_KEY: ${WEBKIT_API_KEY:?set WEBKIT_API_KEY in .env}
       WEBKIT_ADMIN_KEY: ${WEBKIT_ADMIN_KEY:?set WEBKIT_ADMIN_KEY in .env}
-      WEBKIT_NOVNC_HASH: ${WEBKIT_NOVNC_HASH:?set WEBKIT_NOVNC_HASH in .env}
-      WEBKIT_VNC_PASSWORD: ${WEBKIT_VNC_PASSWORD:-}
-      SEARXNG_SECRET: ${SEARXNG_SECRET:?set SEARXNG_SECRET in .env}
-      WEBKIT_MAX_PAGES: ${WEBKIT_MAX_PAGES:-5}
       WEBKIT_S2_API_KEY: ${WEBKIT_S2_API_KEY:-}
-      WEBKIT_TARGETS: ${WEBKIT_TARGETS:-}
-      WEBKIT_TARGET_KEYS: ${WEBKIT_TARGET_KEYS:-}
-      WEBKIT_DEFAULT_VIA: ${WEBKIT_DEFAULT_VIA:-hnas}
-      # Browser time zone. Match the egress IP's region: a UTC browser on a
-      # California IP is an anti-bot signal.
+      WEBKIT_MAX_INFLIGHT: ${WEBKIT_MAX_INFLIGHT:-4}
+      # Browser time zone: match the egress IP's region (a UTC browser on a
+      # California IP is an anti-bot signal).
       TZ: ${WEBKIT_TZ:-UTC}
     volumes:
-      - ./searxng-settings:/etc/searxng:rw
-      - chrome-profile:/data/chrome-profile
+      - chrome-data:/data/chrome-profile
 
 volumes:
-  chrome-profile:
+  chrome-data:

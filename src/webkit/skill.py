@@ -69,7 +69,7 @@ A web page: `read`. A file (a PDF too): `download`; `read` answers `not_a_page` 
   Never `cat` a whole page or saved output.
 - Links in page text are `[text][N]`; the URLs are listed after the text as `[N]: URL`
   (`grep -m1 '^\\[N\\]:' FILE`). `-f links` prints only that list (N, URL, link text).
-- `search` output starts with `# engines google=ok:8 brave=skipped ...`. `error:unreachable` on
+- `search` output starts with `# engines semantic_scholar=ok:8 google_scholar=skipped ...`. `error:unreachable` on
   every engine means Chrome is not connected: say so, do not guess results.
 - One browser (the user's) and one exit IP serve every agent: no bulk searching, few parallel calls.
 - `download` fetches files directly, without browser cookies: paywalled publisher PDFs fail (exit 8);
