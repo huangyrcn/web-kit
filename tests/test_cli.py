@@ -544,6 +544,8 @@ def test_stats_summarizes_engines_pages_and_repeats(tmp_path, capsys):
         _ev(cmd="search", q="a", session="s", exit=0, ms=4000, results=3, printed=900, agent="claude", engines=[
             {"engine": "semantic_scholar", "status": "error", "error": "timeout", "ms": 9000},
             {"engine": "google_scholar", "status": "ok", "count": 3, "ms": 2000}]),
+        _ev(cmd="search", q="a", engine="arxiv", session="s", exit=0, ms=1000, results=1, printed=100, agent="claude",
+            engines=[{"engine": "arxiv", "status": "ok", "count": 1, "ms": 1000}]),  # another engine: not a repeat
         _ev(cmd="search", q="a", session="s", exit=0, ms=3000, results=2, printed=800, agent="claude", engines=[
             {"engine": "semantic_scholar", "status": "ok", "count": 2, "ms": 1000},
             {"engine": "google_scholar", "status": "skipped"}]),
@@ -557,8 +559,8 @@ def test_stats_summarizes_engines_pages_and_repeats(tmp_path, capsys):
     ]) + "\n")
     assert run("stats", "--days", "0", str(f)) == 0
     out = capsys.readouterr().out
-    assert out.startswith("5 events, 2026-11-20T10:00 .. 2026-11-20T11:00")
-    assert "sources: cli/local 4 server 1; callers: other 3 claude 2" in out
+    assert out.startswith("6 events, 2026-11-20T10:00 .. 2026-11-20T11:00")
+    assert "sources: cli/local 5 server 1; callers: claude 3 other 3" in out
     rows = {line.split()[0]: line.split() for line in out.splitlines() if line.startswith(("semantic", "google"))}
     assert rows["semantic_scholar"][1:5] == ["2", "1", "0", "1"] and "timeout" in rows["semantic_scholar"]
     assert rows["google_scholar"][1:5] == ["1", "1", "0", "1"]  # the skipped try is not a try
@@ -567,7 +569,7 @@ def test_stats_summarizes_engines_pages_and_repeats(tmp_path, capsys):
     assert "repeated calls (same session, same query or URL): 1" in out
     assert run("stats", "--json", "--days", "0", str(f)) == 0
     data = json.loads(capsys.readouterr().out)
-    assert data["commands"]["search"]["calls"] == 2 and data["engines"]["semantic_scholar"]["answered"] == 1
+    assert data["commands"]["search"]["calls"] == 3 and data["engines"]["semantic_scholar"]["answered"] == 1
     assert run("stats", "--days", "1", str(f)) == 2  # nothing that recent
     assert "no search / read / download events" in capsys.readouterr().out
 

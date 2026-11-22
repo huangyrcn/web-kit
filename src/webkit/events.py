@@ -277,12 +277,14 @@ def summarize(events: list[dict]) -> dict:
     pages = [p for ev in events for p in ev.get("pages") or []]
     if pages:
         ok = [p for p in pages if not p.get("error")]
+        # only the CLI knows whether a page was cut to its outline (the budget is the client's)
+        cli_ok = [p for ev in events if ev.get("side") == "cli" for p in ev.get("pages") or [] if not p.get("error")]
         failed: dict = {}
         for p in pages:
             if p.get("error"):
                 failed.setdefault(p["error"], []).append(_domain(p.get("url", "")))
         s["pages"] = {"read": len(pages), "ok": len(ok),
-                      "truncated": sum(1 for p in ok if p.get("truncated")),
+                      "truncated": sum(1 for p in cli_ok if p.get("truncated")) if cli_ok else None,
                       "p50_chars": _pct([p.get("chars", 0) for p in ok], 0.5),
                       "p90_chars": _pct([p.get("chars", 0) for p in ok], 0.9),
                       "failed": {cls: {"count": len(ds), "domains": dict(list(_count(ds).items())[:5])}
@@ -306,7 +308,9 @@ def summarize(events: list[dict]) -> dict:
     for ev in sorted(events, key=lambda e: e.get("ts", "")):
         if not ev.get("session"):
             continue
-        what = ev.get("q") or ev.get("url") or tuple(p.get("url") for p in ev.get("pages") or [])
+        # the same call again: same query and engine / profile, same URL and format
+        what = (ev.get("q") or ev.get("url") or tuple(p.get("url") for p in ev.get("pages") or []),
+                ev.get("engine"), ev.get("profile"), ev.get("format"))
         key = (ev.get("side"), ev["session"], ev.get("cmd"), str(what))
         repeats += key in seen
         seen.add(key)
@@ -338,8 +342,8 @@ def render(s: dict, source: str) -> list[str]:
             lines.append(f"{name:<19} {e['tries']:>5} {e['ok']:>3} {e['empty']:>6} {e['answered']:>9}  "
                          f"{_ms(e['p50_ms']):<6} {_ms(e['p90_ms']):<6} {avg:<4} {_pairs(e['errors'])}".rstrip())
     if p := s.get("pages"):
-        lines += ["", f"pages: {p['read']} read, {p['ok']} ok, {p['truncated']} long (outline shown); chars "
-                      f"p50 {p['p50_chars']}, p90 {p['p90_chars']}"]
+        long = "" if p["truncated"] is None else f", {p['truncated']} long (outline shown)"
+        lines += ["", f"pages: {p['read']} read, {p['ok']} ok{long}; chars p50 {p['p50_chars']}, p90 {p['p90_chars']}"]
         for cls, f in p["failed"].items():
             lines.append(f"  {cls} {f['count']}: {_pairs(f['domains'])}")
     if d := s.get("downloads"):

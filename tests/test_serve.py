@@ -218,3 +218,5 @@ def test_the_server_logs_one_line_per_request(server, opencli, capsys, monkeypat
     assert read["pages"][0]["url"] == "https://e.org/p" and read["pages"][0]["chars"] > 0
     assert denied["error"] == "unauthorized" and "q" not in denied  # nothing asked is logged before the key
     assert KEY not in app.event_sink.getvalue() and ADMIN not in app.event_sink.getvalue()
+    out = "\n".join(cli.events.render(cli.events.summarize(evs), "server"))
+    assert "pages: 1 read, 1 ok; chars" in out  # the server cannot know which pages were cut to an outline
